@@ -9,9 +9,92 @@
 
 ---
 
+# 🇬🇧 English Overview
+
+**Universal BMS Remote Diagnostic Monitor & Tailscale Probe** is a standalone hardware-software diagnostic bridge built on the **ESP32-S3 (2MB PSRAM)** with embedded **Tailscale VPN**. It enables remote monitoring, protocol reverse engineering, and live diagnostics of battery management systems based on **JK-BMS** and **JBD-BMS (Xiaoxiang / Overkill / Smart BMS)** without requiring physical on-site presence.
+
+---
+
+## 🌟 Key Features
+
+- **Multi-Protocol BLE Engine:**
+  - **JBD-BMS (Xiaoxiang):** Supports 4S / 8S / 16S / 24S battery configurations, automatic discovery of `0xFF00`, `0xFFF0`, `0xFEE7`, and Nordic UART services, multi-tier PIN authentication (`123456`, `1234`, `000000`, direct poll fallback), and automatic write mode detection (`Write with/without Response`).
+  - **JK-BMS (JiKong / Hankzor):** Complete 24S and 32S protocol support (0x97 / 0x96 handshake) with dynamic frame offset alignment.
+- **Embedded Tailscale VPN Client (MicroLink + WireGuard lwIP):**
+  - Secure remote access from anywhere across the globe without port forwarding, NAT traversal issues, or public IP addresses.
+  - Dynamically allocated in **2 MB PSRAM** buffers supporting up to 32 active peers in your tailnet.
+  - 360-second hardware watchdog and 120-second periodic DERP reconnect cycle.
+- **Interactive Live BLE Diagnostics (Live Packet Trace):**
+  - Web-embedded terminal displaying color-coded transmitted (`[TX >>]`) and received (`[RX <<]`) raw HEX frames.
+  - 1-Click quick test buttons (`Basic Info 0x03`, `Cells 0x04`, `Device Name 0x05`, `PIN Auth Tests 123456 / 1234 / 000000`).
+  - Raw HEX command console allowing manual injection of arbitrary frames over BLE (`POST /api/send-raw-ble`).
+  - 200-entry in-memory ring buffer with clipboard export.
+- **Credential Privacy:**
+  - Tailscale Auth Keys are stored in non-volatile storage (NVS) and never exposed in plain text on the web interface.
+- **Web OTA Firmware Flashing:**
+  - Upload pre-compiled firmware binaries remotely via `/update` over Tailscale.
+- **Thermal Optimization:**
+  - Underclocked CPU frequency (160 MHz) ensures continuous, cool 24/7 standalone operation.
+
+---
+
+## 📐 Hardware Specifications
+
+| Component | Specification |
+| :--- | :--- |
+| **Microcontroller** | ESP32-S3 SuperMini / DevKit (Dual-Core Xtensa LX7 @ 160 MHz) |
+| **Memory** | 4 MB Quad-SPI Flash, **2 MB+ Embedded PSRAM (AP_3v3)** |
+| **Wireless** | 2.4 GHz Wi-Fi (802.11 b/g/n) + Bluetooth 5.0 LE |
+| **Power** | 5V USB-C (~60-80 mA typical power consumption) |
+
+---
+
+## 🚀 Quick Setup Guide
+
+### 1. Build and Upload via PlatformIO
+```bash
+git clone https://github.com/tigersumy/Universal-BMS-Remote-Diagnostic-Monitor-ESP32-S3.git
+cd Universal-BMS-Remote-Diagnostic-Monitor-ESP32-S3
+pio run -t upload
+```
+
+### 2. Initial Configuration (Captive Portal)
+1. Connect your smartphone/PC to the open Wi-Fi AP: **`Universal-BMS-Setup`**.
+2. Open `http://192.168.4.1/setup` in your web browser.
+3. Select your local Wi-Fi SSID, enter the Wi-Fi password, and scan for nearby BMS MAC addresses.
+4. Provide your Tailscale Auth Key (or leave empty if already stored in NVS).
+5. Click **Save & Reboot**.
+
+### 3. Remote Access over Tailscale
+Once connected to the local Wi-Fi network, the device joins your Tailnet automatically:
+- **MagicDNS:** `http://jbd-bms-probe.your-tailnet.ts.net/`
+- **Tailscale IP:** `http://100.x.y.z/`
+
+---
+
+## 📡 REST API Endpoints
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/data` | Real-time battery telemetry, cell voltages, protection switches, and VPN status |
+| `GET` | `/api/debug-log` | Recent 200 entries of the live BLE packet trace |
+| `POST`| `/api/send-raw-ble` | Send raw HEX frame to BMS (`{"hex":"DD A5 03 00 FF FD 77"}`) |
+| `POST`| `/api/reconnect-ble` | Force BLE peripheral reconnection |
+| `POST`| `/api/clear-log` | Clear in-memory diagnostic log buffer |
+| `POST`| `/api/switch` | Toggle charge/discharge protection MOSFETs (`{"switch":"charging","state":true}`) |
+| `GET` | `/api/scan-ble` | Scan Bluetooth air for JK/JBD battery systems |
+| `GET` | `/api/scan-wifi` | Scan available 2.4 GHz Wi-Fi networks |
+| `POST`| `/api/save-config` | Save parameters into NVS and reboot |
+| `POST`| `/update` | Web OTA multipart firmware binary upload |
+
+---
+---
+
 # 🇺🇦 Українська версія
 
-**Universal BMS Remote Diagnostic Monitor** — це автономний апаратно-програмний діагностичний адаптер на базі **ESP32-S3 (2MB PSRAM)** із вбудованим клієнтом **Tailscale VPN**, розроблений для дистанційного моніторингу, реверс-інжинірингу та онлайн-діагностики акумуляторних систем на базі **JK-BMS** та **JBD-BMS (Xiaoxiang / Overkill / Smart BMS)**.
+**Universal BMS Remote Diagnostic Monitor** — це автономний апаратно-програмний діагностичний адаптер на базі **ESP32-S3 (2MB PSRAM)** із вбудованим клієнтом **Tailscale VPN**, розроблений для дистанційного моніторингу, реверс-інжинірингу та онлайн-діагностики акумуляторних систем на базі **JK-BMS** та **JBD-BMS (Xiaoxiang / Overkill / Smart BMS)** без необхідності фізичної присутності на об'єкті.
+
+---
 
 ## 🌟 Ключові можливості
 
@@ -73,84 +156,17 @@ pio run -t upload
 
 ---
 
-## 📡 REST API ендпоінти
+## 🤝 Acknowledgements & Credits
 
-| Метод | Ендпоінт | Опис |
-| :--- | :--- | :--- |
-| `GET` | `/api/data` | Телеметрія батареї, напруги комірок, статус захисту та VPN |
-| `GET` | `/api/debug-log` | Останні 200 записів живого логу BLE трасування |
-| `POST`| `/api/send-raw-ble` | Відправка сирого HEX кадру на BMS (`{"hex":"DD A5 03 00 FF FD 77"}`) |
-| `POST`| `/api/reconnect-ble` | Примусовий перезапуск BLE підключення до BMS |
-| `POST`| `/api/clear-log` | Очищення локального діагностичного буфера |
-| `POST`| `/api/switch` | Керування транзисторами заряду/розряду (`{"switch":"charging","state":true}`) |
-| `GET` | `/api/scan-ble` | Сканування Bluetooth ефіру на наявність JK/JBD плат |
-| `GET` | `/api/scan-wifi` | Сканування доступних Wi-Fi мереж |
-| `POST`| `/api/save-config` | Збереження налаштувань у NVS та перезавантаження |
-| `POST`| `/update` | Web OTA оновлення бінарного образу прошивки |
-
----
----
-
-# 🇬🇧 English Overview
-
-**Universal BMS Remote Diagnostic Monitor & Tailscale Probe** is a standalone hardware-software diagnostic bridge built on the **ESP32-S3 (2MB PSRAM)** with embedded **Tailscale VPN**. It enables remote monitoring, reverse engineering, and protocol diagnostics of battery management systems based on **JK-BMS** and **JBD-BMS (Xiaoxiang / Overkill / Smart BMS)** without requiring on-site presence.
-
-## 🌟 Key Features
-
-- **Multi-Protocol BLE Engine:**
-  - **JBD-BMS (Xiaoxiang):** 4S / 8S / 16S / 24S cell grids, automatic discovery of `0xFF00`, `0xFFF0`, `0xFEE7` and Nordic UART services, multi-tier PIN authentication (`123456`, `1234`, `000000`, direct poll), automatic write mode detection (`Write with/without Response`).
-  - **JK-BMS (JiKong / Hankzor):** 24S and 32S protocol support (0x97 / 0x96 handshake) with dynamic frame offset alignment.
-- **Embedded Tailscale VPN Client (MicroLink + WireGuard lwIP):**
-  - Secure remote access from anywhere across the globe without port forwarding, NAT traversal issues, or public IP addresses.
-  - Dynamically allocated in **2 MB PSRAM** buffers supporting up to 32 active peers.
-  - 360-second hardware watchdog and 120-second periodic DERP reconnect cycle.
-- **Interactive Live BLE Diagnostics (Live Packet Trace):**
-  - Web-embedded terminal displaying color-coded transmitted (`[TX >>]`) and received (`[RX <<]`) raw HEX frames.
-  - 1-Click test buttons (`Basic Info 0x03`, `Cells 0x04`, `Device Name 0x05`, `PIN Auth Tests`).
-  - Raw HEX command console allowing manual injection of arbitrary frames over BLE (`POST /api/send-raw-ble`).
-  - 200-entry in-memory ring buffer with clipboard export.
-- **Credential Privacy:**
-  - Tailscale Auth Keys are stored in non-volatile storage (NVS) and never exposed in plain text on the web interface.
-- **Web OTA Firmware Flashing:**
-  - Upload pre-compiled firmware binaries remotely via `/update` over Tailscale.
-- **Thermal Optimization:**
-  - Underclocked CPU frequency (160 MHz) ensures continuous, cool 24/7 standalone operation.
-
----
-
-## 📐 Hardware Specifications
-
-- **SoC:** ESP32-S3 SuperMini / DevKit (Dual-Core Xtensa LX7 @ 160 MHz)
-- **Memory:** 4 MB Quad-SPI Flash, 2 MB Embedded PSRAM (AP_3v3)
-- **Radios:** 2.4 GHz Wi-Fi (802.11 b/g/n) + Bluetooth 5.0 LE
-- **Power:** 5V USB-C (~60-80 mA typical power consumption)
-
----
-
-## 🚀 Quick Setup Guide
-
-### 1. Build and Upload via PlatformIO
-```bash
-git clone https://github.com/tigersumy/Universal-BMS-Remote-Diagnostic-Monitor-ESP32-S3.git
-cd Universal-BMS-Remote-Diagnostic-Monitor-ESP32-S3
-pio run -t upload
-```
-
-### 2. Initial Configuration (Captive Portal)
-1. Connect your smartphone/PC to the open Wi-Fi AP: **`Universal-BMS-Setup`**.
-2. Open `http://192.168.4.1/setup` in your web browser.
-3. Select your local Wi-Fi SSID, enter the Wi-Fi password, and scan for nearby BMS MAC addresses.
-4. Provide your Tailscale Auth Key and desired hostname.
-5. Click **Save & Reboot**.
-
-### 3. Remote Access over Tailscale
-Once connected to the local Wi-Fi network, the device joins your Tailnet automatically:
-- **MagicDNS:** `http://jbd-bms-probe.your-tailnet.ts.net/`
-- **Tailscale IP:** `http://100.x.y.z/`
+This project builds upon and integrates several exceptional open-source libraries:
+- **[MicroLink by CamM2325](https://github.com/CamM2325/microlink):** The embedded Tailscale client implementation for ESP32 (ts2021 control protocol, Noise IK mutual authentication, DERP relay protocol, and magicsock architecture) is adapted from the MicroLink project.
+- **[wireguard-lwip by Daniel Hope](https://github.com/djp952/wireguard-lwip):** Lightweight WireGuard implementation for lwIP providing ChaCha20-Poly1305, BLAKE2s, and Curve25519 cryptographic primitives.
+- **[NimBLE-Arduino by h2zero](https://github.com/h2zero/NimBLE-Arduino):** Memory-efficient Bluetooth Low Energy stack for ESP32.
+- **[ArduinoJson by Benoît Blanchon](https://arduinojson.org/):** High-performance JSON parser for embedded systems.
 
 ---
 
 ## 📄 License
 
-This project is open-source under the [MIT License](LICENSE).
-Feel free to fork, adapt, and integrate into your energy monitoring setups!
+This project is licensed under the [MIT License](LICENSE).
+Feel free to use, modify, and integrate into your home energy systems!
