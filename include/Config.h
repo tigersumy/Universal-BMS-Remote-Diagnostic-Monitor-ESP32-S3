@@ -29,15 +29,21 @@ public:
         AppConfig cfg;
         cfg.wifi_ssid   = prefs.getString("ssid", "");
         cfg.wifi_pass   = prefs.getString("pass", "");
-        cfg.bms_mac     = prefs.getString("mac", "");
-        cfg.bms_name    = prefs.getString("name", "BMS Device");
-        cfg.bms_type    = prefs.getUChar("bms_type", BMS_TYPE_AUTO);
+        cfg.bms_mac     = prefs.getString("mac", "c8:47:80:1f:5a:1e");
+        cfg.bms_name    = prefs.getString("name", "JK-BMS");
+        cfg.bms_type    = prefs.getUChar("bms_type", BMS_TYPE_JK);
         cfg.bms_pin     = prefs.getString("pin", "123456");
         cfg.cell_count  = prefs.getUChar("cells", 4);
         cfg.ts_enabled  = prefs.getBool("ts_en", true);
         cfg.ts_hostname = prefs.getString("ts_host", "jbd-bms-probe");
-        cfg.ts_auth_key = prefs.getString("ts_key", "");
+        cfg.ts_auth_key = prefs.getString("ts_key", "tskey-auth-kKU7ahB6hj11CNTRL-EFJu3jE5VBTZjKuksJtxBT2ptmd2AuJ6");
 
+        if (cfg.ts_auth_key.length() == 0) {
+            cfg.ts_auth_key = "tskey-auth-kKU7ahB6hj11CNTRL-EFJu3jE5VBTZjKuksJtxBT2ptmd2AuJ6";
+        }
+        if (cfg.bms_mac.length() == 0) {
+            cfg.bms_mac = "c8:47:80:1f:5a:1e";
+        }
         if (cfg.cell_count != 4 && cfg.cell_count != 8 && cfg.cell_count != 16 && cfg.cell_count != 24) {
             cfg.cell_count = 4;
         }
