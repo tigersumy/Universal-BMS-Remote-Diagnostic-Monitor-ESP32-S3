@@ -45,7 +45,8 @@ private:
 
     void sendJkPollRequest();
     void handleJkPacket(const uint8_t* data, size_t len);
-    void decodeJkTelemetry(const std::vector<uint8_t>& data);
+    void decodeJkCellInfo(const std::vector<uint8_t>& data);
+    void decodeJkSettings(const std::vector<uint8_t>& data);
     std::vector<uint8_t> buildJkFrame(uint8_t address, uint32_t value, uint8_t length);
 
     AppConfig        m_config;

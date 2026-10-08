@@ -687,25 +687,43 @@ void BmsBleClient::sendJkPollRequest() {
 void BmsBleClient::handleJkPacket(const uint8_t* data, size_t len) {
     if (len == 0) return;
 
-    if (m_rxBuffer.size() > 500) m_rxBuffer.clear();
+    if (m_rxBuffer.size() > 500) {
+        m_rxBuffer.clear();
+    }
+    // If packet starts with JK response header 0x55 0xAA 0xEB 0x90, reset buffer
     if (len >= 4 && data[0] == 0x55 && data[1] == 0xAA && data[2] == 0xEB && data[3] == 0x90) {
         m_rxBuffer.clear();
     }
 
     m_rxBuffer.insert(m_rxBuffer.end(), data, data + len);
 
-    if (m_rxBuffer.size() >= 300) {
-        decodeJkTelemetry(m_rxBuffer);
-        m_rxBuffer.clear();
+    if (m_rxBuffer.size() >= 5 && m_rxBuffer[0] == 0x55 && m_rxBuffer[1] == 0xAA && m_rxBuffer[2] == 0xEB && m_rxBuffer[3] == 0x90) {
+        uint8_t frameType = m_rxBuffer[4];
+        if (frameType == 0x01 && m_rxBuffer.size() >= 130) {
+            decodeJkSettings(m_rxBuffer);
+            m_rxBuffer.clear();
+        } else if (frameType == 0x02 && m_rxBuffer.size() >= 300) {
+            decodeJkCellInfo(m_rxBuffer);
+            m_rxBuffer.clear();
+        }
     }
 }
 
-void BmsBleClient::decodeJkTelemetry(const std::vector<uint8_t>& data) {
-    if (data.size() < 300) return;
-    if (data[0] != 0x55 || data[1] != 0xAA || data[2] != 0xEB || data[3] != 0x90) return;
+void BmsBleClient::decodeJkSettings(const std::vector<uint8_t>& data) {
+    if (data.size() < 130) return;
+    // Charge switch at 118, Discharge switch at 122, Balancer switch at 126
+    m_telemetry.switch_charging    = (data[118] != 0);
+    m_telemetry.switch_discharging = (data[122] != 0);
+    m_telemetry.switch_balancer    = (data[126] != 0);
+    m_telemetry.last_update = millis();
+    char buf[128];
+    sprintf(buf, "JK Settings: Charge=%d, Discharge=%d, Balancer=%d",
+            m_telemetry.switch_charging, m_telemetry.switch_discharging, m_telemetry.switch_balancer);
+    DebugLogger::info(TAG, buf);
+}
 
-    uint8_t frameType = data[4];
-    if (frameType != 0x02) return;
+void BmsBleClient::decodeJkCellInfo(const std::vector<uint8_t>& data) {
+    if (data.size() < 300) return;
 
     auto get16 = [&](size_t i) -> uint16_t {
         if (i + 1 >= data.size()) return 0;
@@ -715,36 +733,58 @@ void BmsBleClient::decodeJkTelemetry(const std::vector<uint8_t>& data) {
         return (uint32_t(get16(i + 2)) << 16) | uint32_t(get16(i));
     };
 
-    uint8_t count = m_telemetry.cell_count;
-    if (count != 4 && count != 8 && count != 16 && count != 24) count = 4;
+    // Detect 32S offset vs 24S offset
+    size_t offset = 0;
+    float v32 = (float)get32(150) * 0.001f;
+    float v24 = (float)get32(118) * 0.001f;
+    if (v32 >= 8.0f && v32 <= 80.0f) {
+        offset = 32; // JK02_32S protocol
+    } else if (v24 >= 8.0f && v24 <= 80.0f) {
+        offset = 0;  // JK02_24S protocol
+    } else {
+        offset = 32; // Default to 32S
+    }
 
+    // Cell Voltages (bytes 6 + i * 2)
     float minV = 999.0f;
     float maxV = 0.0f;
     uint8_t minIdx = 1;
     uint8_t maxIdx = 1;
+    uint8_t detectedCells = 0;
 
-    for (int i = 0; i < count && i < 24; i++) {
+    for (int i = 0; i < 32; i++) {
         float v = (float)get16(6 + i * 2) * 0.001f;
-        m_telemetry.cell_voltages[i] = v;
-        if (v > 0.5f) {
-            if (v < minV) { minV = v; minIdx = i + 1; }
-            if (v > maxV) { maxV = v; maxIdx = i + 1; }
+        if (v >= 0.5f && v <= 5.0f) {
+            m_telemetry.cell_voltages[i] = v;
+            detectedCells = i + 1;
+            if (v < minV) {
+                minV = v;
+                minIdx = i + 1;
+            }
+            if (v > maxV) {
+                maxV = v;
+                maxIdx = i + 1;
+            }
+        } else {
+            m_telemetry.cell_voltages[i] = 0.0f;
         }
+    }
+
+    if (detectedCells > 0) {
+        m_telemetry.cell_count = detectedCells;
+    } else if (m_config.cell_count > 0) {
+        m_telemetry.cell_count = m_config.cell_count;
     }
 
     m_telemetry.min_cell_v = (minV < 900.0f) ? minV : 0.0f;
     m_telemetry.max_cell_v = maxV;
-    m_telemetry.delta_cell_v = (maxV > minV) ? (maxV - minV) : 0.0f;
+    m_telemetry.delta_cell_v = (maxV > minV && minV < 900.0f) ? (maxV - minV) : 0.0f;
     m_telemetry.min_cell_idx = minIdx;
     m_telemetry.max_cell_idx = maxIdx;
 
-    size_t offset = 32;
-    float v32 = (float)get32(150) * 0.001f;
-    float v24 = (float)get32(118) * 0.001f;
-    if (v32 >= 8.0f && v32 <= 80.0f) offset = 32;
-    else if (v24 >= 8.0f && v24 <= 80.0f) offset = 0;
-
     m_telemetry.total_voltage = (float)get32(118 + offset) * 0.001f;
+
+    // Current (signed 32-bit: positive = charge, negative = discharge)
     int32_t rawCurrent = (int32_t)get32(126 + offset);
     m_telemetry.current = (float)rawCurrent * 0.001f;
     m_telemetry.power = m_telemetry.total_voltage * m_telemetry.current;
@@ -756,38 +796,51 @@ void BmsBleClient::decodeJkTelemetry(const std::vector<uint8_t>& data) {
         m_telemetry.discharge_power = -m_telemetry.power;
     }
 
+    // Temperatures
     m_telemetry.temp_sensor1 = (float)((int16_t)get16(130 + offset)) * 0.1f;
     m_telemetry.temp_sensor2 = (float)((int16_t)get16(132 + offset)) * 0.1f;
-    if (offset == 32) m_telemetry.temp_mos = (float)((int16_t)get16(112 + offset)) * 0.1f;
-    else m_telemetry.temp_mos = (float)((int16_t)get16(134 + offset)) * 0.1f;
+    if (offset == 32) {
+        m_telemetry.temp_mos = (float)((int16_t)get16(112 + offset)) * 0.1f;
+    } else {
+        m_telemetry.temp_mos = (float)((int16_t)get16(134 + offset)) * 0.1f;
+    }
 
+    // Balancer
     m_telemetry.balancing_current = (float)((int16_t)get16(138 + offset)) * 0.001f;
     uint8_t balState = (140 + offset < data.size()) ? data[140 + offset] : 0;
     m_telemetry.balancing_active = (balState != 0);
-    if (balState == 1) m_telemetry.balancer_direction = "Заряд осередку";
-    else if (balState == 2) m_telemetry.balancer_direction = "Розряд осередку";
-    else m_telemetry.balancer_direction = "Очікування";
 
-    if (141 + offset < data.size()) m_telemetry.soc = (float)data[141 + offset];
+    // SOC & Capacity
+    if (141 + offset < data.size()) {
+        m_telemetry.soc = (float)data[141 + offset];
+    }
     m_telemetry.capacity_remain = (float)get32(142 + offset) * 0.001f;
-    m_telemetry.cycle_count     = get32(150 + offset);
-    m_telemetry.cycle_capacity  = (float)get32(154 + offset) * 0.001f;
+    m_telemetry.capacity_total  = (float)get32(146 + offset) * 0.001f;
 
+    // Cycle Count
+    m_telemetry.cycle_count = get32(150 + offset);
+
+    // Errors bitmask
     uint32_t errs = get32(134 + offset);
     m_telemetry.raw_errors = errs;
     m_telemetry.errors_str = (errs == 0) ? "OK (Без помилок)" : ("0x" + String(errs, HEX));
 
+    // Real-time switch states from live cell info frame
     if (167 + offset < data.size()) {
         m_telemetry.switch_charging    = (data[166 + offset] != 0);
         m_telemetry.switch_discharging = (data[167 + offset] != 0);
     }
 
-    m_telemetry.last_update = millis();
     m_telemetry.connected = true;
+    m_telemetry.last_update = millis();
 
-    char buf[128];
-    sprintf(buf, "JK Telemetry: V=%.2fV, I=%.2fA, SOC=%.0f%%, Errors: %s",
-            m_telemetry.total_voltage, m_telemetry.current, m_telemetry.soc, m_telemetry.errors_str.c_str());
+    char buf[160];
+    sprintf(buf, "JK Telemetry (%dS): V=%.2fV, I=%.2fA, SOC=%.0f%%, Delta=%.3fV (Min=C%d:%.3fV, Max=C%d:%.3fV)",
+            m_telemetry.cell_count,
+            m_telemetry.total_voltage, m_telemetry.current, m_telemetry.soc,
+            m_telemetry.delta_cell_v,
+            m_telemetry.min_cell_idx, m_telemetry.min_cell_v,
+            m_telemetry.max_cell_idx, m_telemetry.max_cell_v);
     DebugLogger::info(TAG, buf);
 }
 

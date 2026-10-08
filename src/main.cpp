@@ -141,6 +141,24 @@ void setupWebServerRoutes() {
         server.send_P(200, "text/html", SETUP_HTML);
     });
 
+    server.on("/settings", HTTP_GET, []() {
+        server.send_P(200, "text/html", SETUP_HTML);
+    });
+
+    // Captive Portal Redirects
+    server.on("/generate_204", HTTP_GET, []() {
+        server.sendHeader("Location", "http://192.168.4.1/setup", true);
+        server.send(302, "text/plain", "");
+    });
+    server.on("/hotspot-detect.html", HTTP_GET, []() {
+        server.sendHeader("Location", "http://192.168.4.1/setup", true);
+        server.send(302, "text/plain", "");
+    });
+    server.on("/canonical.html", HTTP_GET, []() {
+        server.sendHeader("Location", "http://192.168.4.1/setup", true);
+        server.send(302, "text/plain", "");
+    });
+
     auto sendFavicon = []() {
         server.sendHeader("Cache-Control", "public, max-age=604800");
         server.send_P(200, "image/svg+xml", FAVICON_SVG);
@@ -420,12 +438,18 @@ void setupWebServerRoutes() {
 
 void startApMode() {
     isApMode = true;
+    WiFi.persistent(false);
+    WiFi.disconnect(true);
     WiFi.mode(WIFI_AP);
-    WiFi.softAP("Universal-BMS-Setup");
     IPAddress apIP(192, 168, 4, 1);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+    IPAddress gateway(192, 168, 4, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    WiFi.softAPConfig(apIP, gateway, subnet);
+    bool apOk = WiFi.softAP("Universal-BMS-Setup", nullptr, 1, 0, 4);
+    delay(200);
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
     dnsServer.start(DNS_PORT, "*", apIP);
-    DebugLogger::info("WIFI", "Started AP Mode: 'Universal-BMS-Setup' (192.168.4.1)");
+    DebugLogger::info("WIFI", "Started AP Mode: 'Universal-BMS-Setup' (192.168.4.1), status: " + String(apOk ? "OK" : "ERR"));
 }
 
 void checkBootButton() {
@@ -442,6 +466,14 @@ void checkBootButton() {
         if (bootPressStart != 0) {
             bootPressStart = 0;
         }
+    }
+}
+
+static void bleWorkerTask(void* param) {
+    DebugLogger::info("BLE", "BLE Worker Task started on background FreeRTOS thread");
+    while (true) {
+        bleClient.loop();
+        vTaskDelay(pdMS_TO_TICKS(15));
     }
 }
 
@@ -501,6 +533,9 @@ void setup() {
     setupWebServerRoutes();
     server.begin();
     DebugLogger::info("HTTP", "WebServer started on port 80");
+
+    // Start BLE worker task in background FreeRTOS thread
+    xTaskCreatePinnedToCore(bleWorkerTask, "ble_worker", 8192, NULL, 1, NULL, 0);
 }
 
 void loop() {
@@ -511,7 +546,7 @@ void loop() {
     }
 
     server.handleClient();
-    bleClient.loop();
+    delay(2);
 
 #if ENABLE_TAILSCALE
     static uint32_t derpDisconnectedStartMs = 0;
