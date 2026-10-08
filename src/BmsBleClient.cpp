@@ -394,9 +394,12 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
             m_telemetry.mac_address = address.toString().c_str();
             m_telemetry.last_update = millis();
 
+            NimBLERemoteCharacteristic* writeChar = m_pJkWriteChar ? m_pJkWriteChar : m_pJkNotifyChar;
             auto frameDev = buildJkFrame(0x97, 0, 0);
             DebugLogger::logTx(TAG, frameDev.data(), frameDev.size(), "JK DeviceInfo (0x97)");
-            m_pJkNotifyChar->writeValue(frameDev.data(), frameDev.size(), false);
+            if (writeChar) {
+                writeChar->writeValue(frameDev.data(), frameDev.size(), false);
+            }
             delay(250);
 
             sendJkPollRequest();
@@ -678,10 +681,12 @@ std::vector<uint8_t> BmsBleClient::buildJkFrame(uint8_t address, uint32_t value,
 }
 
 void BmsBleClient::sendJkPollRequest() {
-    if (!m_pJkNotifyChar || !m_isConnected) return;
+    if (!m_isConnected) return;
+    NimBLERemoteCharacteristic* writeChar = m_pJkWriteChar ? m_pJkWriteChar : m_pJkNotifyChar;
+    if (!writeChar) return;
     auto frame = buildJkFrame(0x96, 0, 0);
     DebugLogger::logTx(TAG, frame.data(), frame.size(), "JK CellInfo (0x96)");
-    m_pJkNotifyChar->writeValue(frame.data(), frame.size(), false);
+    writeChar->writeValue(frame.data(), frame.size(), false);
 }
 
 void BmsBleClient::handleJkPacket(const uint8_t* data, size_t len) {
@@ -874,8 +879,9 @@ bool BmsBleClient::setSwitch(const String& sw, bool state) {
 
         auto frame = buildJkFrame(reg, state ? 1 : 0, 4);
         DebugLogger::logTx(TAG, frame.data(), frame.size(), "JK Switch " + sw);
-        if (m_pJkNotifyChar) {
-            bool ok = m_pJkNotifyChar->writeValue(frame.data(), frame.size(), false);
+        NimBLERemoteCharacteristic* writeChar = m_pJkWriteChar ? m_pJkWriteChar : m_pJkNotifyChar;
+        if (writeChar) {
+            bool ok = writeChar->writeValue(frame.data(), frame.size(), false);
             if (ok) {
                 if (sw == "charging") m_telemetry.switch_charging = state;
                 else if (sw == "discharging") m_telemetry.switch_discharging = state;
