@@ -3,386 +3,298 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
-#include <Update.h>
 #include <ArduinoJson.h>
+#include <Update.h>
 
 #include "Config.h"
-#include "BmsProtocol.h"
 #include "BmsBleClient.h"
-#include "DebugLogger.h"
 #include "WebDashboard.h"
 
-#if ENABLE_TAILSCALE
-extern "C" {
-#include "microlink.h"
-#include "microlink_internal.h"
-}
-#endif
-
-// Hardware pins
-#define BOOT_BUTTON_PIN 0
-#define DNS_PORT 53
-
-static WebServer server(80);
+// DNS Server for Captive Portal
+static const byte DNS_PORT = 53;
 static DNSServer dnsServer;
-static BmsBleClient bleClient;
-static AppConfig currentConfig;
-static bool isApMode = false;
-static uint32_t bootPressStart = 0;
 
-#if ENABLE_TAILSCALE
-static microlink_t* mlHandle = nullptr;
-static microlink_state_t tsState = ML_STATE_IDLE;
-static String tsVpnIpStr = "";
-static String tsStatusStr = "IDLE";
+// Web Server
+static WebServer server(80);
 
-static void onTailscaleStateChange(microlink_t* ml, microlink_state_t state, void* user_data) {
-    tsState = state;
-    const char *state_names[] = {
-        "IDLE", "WIFI_WAIT", "CONNECTING", "REGISTERING",
-        "CONNECTED", "RECONNECTING", "ERROR"
-    };
-    tsStatusStr = (state < sizeof(state_names)/sizeof(state_names[0])) ? state_names[state] : "UNKNOWN";
-    DebugLogger::info("TAILSCALE", "State: " + tsStatusStr);
+// Global objects
+static AppConfig g_config;
+static BmsBleClient g_bleClient;
 
-    if (state == ML_STATE_CONNECTED) {
-        uint32_t ip = microlink_get_vpn_ip(ml);
-        char ip_str[16];
-        microlink_ip_to_str(ip, ip_str);
-        tsVpnIpStr = String(ip_str);
-        DebugLogger::info("TAILSCALE", "Connected to Tailnet! VPN IP: " + tsVpnIpStr);
-    }
-}
+static bool g_isApMode = false;
+static uint32_t g_lastBleLoop = 0;
+static uint32_t g_wifiConnectStartTime = 0;
 
-void startTailscaleClient() {
-    if (!currentConfig.ts_enabled || currentConfig.ts_auth_key.length() == 0) {
-        DebugLogger::warn("TAILSCALE", "Disabled or no Auth Key configured");
-        return;
-    }
-    if (mlHandle != nullptr) {
-        DebugLogger::info("TAILSCALE", "Already running");
-        return;
-    }
+void setupWifi() {
+    WiFi.persistent(false);
+    WiFi.disconnect(true);
+    WiFi.setSleep(false);
+    delay(100);
 
-    DebugLogger::info("TAILSCALE", "Starting Tailscale client (hostname: '" + currentConfig.ts_hostname + "')...");
+    if (g_config.wifi_ssid.length() > 0) {
+        WiFi.mode(WIFI_STA);
+        Serial.printf("[WiFi] Connecting to %s...\n", g_config.wifi_ssid.c_str());
+        WiFi.begin(g_config.wifi_ssid.c_str(), g_config.wifi_pass.c_str());
 
-    microlink_config_t config = {
-        .auth_key = currentConfig.ts_auth_key.c_str(),
-        .device_name = currentConfig.ts_hostname.length() > 0 ? currentConfig.ts_hostname.c_str() : "jbd-bms-probe",
-        .enable_derp = true,
-        .enable_stun = true,
-        .enable_disco = true,
-        .max_peers = 32,
-        .wifi_tx_power_dbm = 13,
-        .priority_peer_ip = 0,
-        .disco_heartbeat_ms = 0,
-        .stun_interval_ms = 0,
-        .ctrl_watchdog_ms = 0
-    };
-
-    mlHandle = microlink_init(&config);
-    if (!mlHandle) {
-        DebugLogger::error("TAILSCALE", "Failed to initialize MicroLink!");
-        tsStatusStr = "INIT_FAILED";
-        return;
-    }
-
-    microlink_set_state_callback(mlHandle, onTailscaleStateChange, NULL);
-    esp_err_t err = microlink_start(mlHandle);
-    if (err != ESP_OK) {
-        DebugLogger::error("TAILSCALE", "microlink_start returned error: " + String(err));
-        tsStatusStr = "START_FAILED";
-    } else {
-        DebugLogger::info("TAILSCALE", "MicroLink started in background");
-        tsStatusStr = "CONNECTING";
-    }
-}
-
-void stopTailscaleClient() {
-    if (mlHandle != nullptr) {
-        DebugLogger::info("TAILSCALE", "Stopping and cleaning up MicroLink client...");
-        microlink_destroy(mlHandle);
-        mlHandle = nullptr;
-        tsState = ML_STATE_IDLE;
-        tsStatusStr = "STOPPED";
-        tsVpnIpStr = "";
-        DebugLogger::info("TAILSCALE", "MicroLink client stopped");
-    }
-}
-
-void restartTailscaleClient() {
-    DebugLogger::info("TAILSCALE", "Soft-restarting Tailscale client...");
-    stopTailscaleClient();
-    delay(500);
-    startTailscaleClient();
-}
-#endif
-
-// Captive Portal detection
-bool isCaptivePortalRequest() {
-    if (!isApMode) return false;
-    String host = server.hostHeader();
-    if (host.length() == 0 || host.indexOf("192.168.4.1") >= 0) {
-        return false;
-    }
-    return true;
-}
-
-void setupWebServerRoutes() {
-    server.on("/", HTTP_GET, []() {
-        if (isApMode || currentConfig.wifi_ssid.length() == 0) {
-            server.send_P(200, "text/html", SETUP_HTML);
-        } else {
-            server.send_P(200, "text/html", INDEX_HTML);
+        g_wifiConnectStartTime = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - g_wifiConnectStartTime < 10000) {
+            delay(250);
+            Serial.print(".");
         }
+        Serial.println();
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        g_isApMode = false;
+        Serial.printf("[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        if (MDNS.begin("bms-monitor")) {
+            Serial.println("[MDNS] Responder started: http://bms-monitor.local");
+            MDNS.addService("http", "tcp", 80);
+        }
+    } else {
+        g_isApMode = true;
+        Serial.println("[WiFi] Starting Fallback Access Point (AP Mode)...");
+        WiFi.mode(WIFI_AP);
+        IPAddress apIP(192, 168, 4, 1);
+        IPAddress gateway(192, 168, 4, 1);
+        IPAddress subnet(255, 255, 255, 0);
+        WiFi.softAPConfig(apIP, gateway, subnet);
+        bool apOk = WiFi.softAP("BMS-Monitor-AP", nullptr, 1, 0, 4);
+        delay(200);
+        Serial.printf("[WiFi] AP status: %s, AP IP address: %s\n", apOk ? "OK" : "ERR", WiFi.softAPIP().toString().c_str());
+
+        dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+        dnsServer.start(DNS_PORT, "*", apIP);
+        if (MDNS.begin("bms-monitor")) {
+            MDNS.addService("http", "tcp", 80);
+        }
+    }
+}
+
+void setupHttpRoutes() {
+    // Web Pages
+    server.on("/", HTTP_GET, []() {
+        server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
     });
 
     server.on("/setup", HTTP_GET, []() {
-        server.send_P(200, "text/html", SETUP_HTML);
+        server.send_P(200, "text/html; charset=utf-8", SETUP_HTML);
     });
 
-    auto sendFavicon = []() {
-        server.sendHeader("Cache-Control", "public, max-age=604800");
+    server.on("/settings", HTTP_GET, []() {
+        server.send_P(200, "text/html; charset=utf-8", SETUP_HTML);
+    });
+
+    server.on("/favicon.svg", HTTP_GET, []() {
         server.send_P(200, "image/svg+xml", FAVICON_SVG);
-    };
-    server.on("/favicon.ico", HTTP_GET, sendFavicon);
-    server.on("/favicon.svg", HTTP_GET, sendFavicon);
+    });
 
-    // API: Live Telemetry
+    server.on("/favicon.ico", HTTP_GET, []() {
+        server.send_P(200, "image/svg+xml", FAVICON_SVG);
+    });
+
+    // Captive Portal Redirects
+    server.on("/generate_204", HTTP_GET, []() {
+        server.sendHeader("Location", "/setup", true);
+        server.send(302, "text/plain", "");
+    });
+    server.on("/hotspot-detect.html", HTTP_GET, []() {
+        server.sendHeader("Location", "/setup", true);
+        server.send(302, "text/plain", "");
+    });
+    server.on("/canonical.html", HTTP_GET, []() {
+        server.sendHeader("Location", "/setup", true);
+        server.send(302, "text/plain", "");
+    });
+
+    // API: Telemetry
     server.on("/api/data", HTTP_GET, []() {
-        const auto& t = bleClient.getTelemetry();
+        const BmsTelemetry& telem = g_bleClient.getTelemetry();
+
         JsonDocument doc;
-        doc["connected"] = bleClient.isConnected();
-        doc["bms_type"]  = t.bms_type;
-        doc["device_name"] = t.device_name;
-        doc["mac"] = t.mac_address;
-        doc["total_voltage"] = t.total_voltage;
-        doc["current"] = t.current;
-        doc["power"] = t.power;
-        doc["charge_power"] = t.charge_power;
-        doc["discharge_power"] = t.discharge_power;
-        doc["soc"] = t.soc;
-        doc["capacity_remain"] = t.capacity_remain;
-        doc["cycle_count"] = t.cycle_count;
-        doc["cell_count"] = t.cell_count;
+        doc["connected"] = telem.connected;
+        doc["bms_type"] = telem.bms_type;
+        doc["name"] = telem.device_name.length() > 0 ? telem.device_name : g_config.bms_name;
+        doc["mac"] = telem.mac_address.length() > 0 ? telem.mac_address : g_config.bms_mac;
+        doc["last_update"] = telem.last_update;
 
-        JsonArray cells = doc["cells"].to<JsonArray>();
-        for (int i = 0; i < t.cell_count && i < 32; i++) {
-            cells.add(t.cell_voltages[i]);
+        // KPI
+        doc["total_voltage"] = telem.total_voltage;
+        doc["current"] = telem.current;
+        doc["power"] = telem.power;
+        doc["soc"] = telem.soc;
+        doc["capacity_remain"] = telem.capacity_remain;
+        doc["capacity_nominal"] = telem.capacity_nominal;
+        doc["cycle_count"] = telem.cycle_count;
+
+        // Cells
+        uint8_t count = g_config.cell_count > 0 ? g_config.cell_count : (telem.cell_count > 0 ? telem.cell_count : 8);
+        doc["cell_count"] = count;
+
+        JsonArray cellsArr = doc["cells"].to<JsonArray>();
+        for (uint8_t i = 0; i < count; i++) {
+            cellsArr.add(i < 32 ? telem.cell_voltages[i] : 0.0f);
         }
-        doc["min_cell_idx"] = t.min_cell_idx;
-        doc["max_cell_idx"] = t.max_cell_idx;
-        doc["min_cell_v"]   = t.min_cell_v;
-        doc["max_cell_v"]   = t.max_cell_v;
-        doc["delta_cell_v"] = t.delta_cell_v;
 
-        doc["temp_mos"] = t.temp_mos;
-        doc["temp_sensor1"] = t.temp_sensor1;
-        doc["temp_sensor2"] = t.temp_sensor2;
+        doc["min_cell_idx"] = telem.min_cell_idx;
+        doc["max_cell_idx"] = telem.max_cell_idx;
+        doc["min_cell_v"] = telem.min_cell_v;
+        doc["max_cell_v"] = telem.max_cell_v;
+        doc["delta_cell_v"] = telem.delta_cell_v;
 
-        doc["switch_charging"] = t.switch_charging;
-        doc["switch_discharging"] = t.switch_discharging;
-        doc["switch_balancer"] = t.switch_balancer;
+        // Temps
+        doc["temp_mos"] = telem.temp_mos;
+        doc["temp_sensor1"] = telem.temp_sensor1;
+        doc["temp_sensor2"] = telem.temp_sensor2;
 
-        doc["errors"] = t.errors_str;
+        // Balancer & Switches
+        doc["balancing_active"] = telem.balancing_active;
+        doc["balancing_current"] = telem.balancing_current;
+        doc["switch_charging"] = telem.switch_charging;
+        doc["switch_discharging"] = telem.switch_discharging;
+        doc["switch_balancer"] = telem.switch_balancer;
 
-#if ENABLE_TAILSCALE
-        doc["ts_enabled"] = currentConfig.ts_enabled;
-        doc["ts_connected"] = (tsState == ML_STATE_CONNECTED);
-        doc["ts_ip"] = tsVpnIpStr;
-        doc["ts_status"] = tsStatusStr;
-        if (mlHandle) {
-            doc["ts_derp_conn"] = mlHandle->derp.connected;
-            doc["ts_peer_cnt"] = mlHandle->peer_count;
-            doc["ts_derp_region"] = mlHandle->derp_home_region;
-        }
-#else
-        doc["ts_enabled"] = false;
-        doc["ts_connected"] = false;
-        doc["ts_ip"] = "";
-        doc["ts_status"] = "NOT_SUPPORTED";
-#endif
-
+        doc["errors"] = telem.errors_str;
         doc["heap_free"] = ESP.getFreeHeap() / 1024;
-        doc["psram_free"] = ESP.getFreePsram() / 1024;
+        doc["wifi_rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+        doc["ip"] = g_isApMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
 
-        String out;
-        serializeJson(doc, out);
-        server.send(200, "application/json", out);
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json; charset=utf-8", response);
     });
 
-    // API: Config
-    server.on("/api/config", HTTP_GET, []() {
-        JsonDocument doc;
-        doc["ssid"] = currentConfig.wifi_ssid;
-        doc["mac"]  = currentConfig.bms_mac;
-        doc["name"] = currentConfig.bms_name;
-        doc["bms_type"] = currentConfig.bms_type;
-        doc["pin"]  = currentConfig.bms_pin;
-        doc["cells"] = currentConfig.cell_count;
-        doc["ts_hostname"] = currentConfig.ts_hostname;
-        doc["has_ts_key"] = (currentConfig.ts_auth_key.length() > 0);
-        String out;
-        serializeJson(doc, out);
-        server.send(200, "application/json", out);
-    });
-
-    // API: Live Debug Log (Remote Diagnostics)
-    server.on("/api/debug-log", HTTP_GET, []() {
-        server.send(200, "application/json", DebugLogger::toJson());
-    });
-
-    // API: Clear Debug Log
-    server.on("/api/clear-log", HTTP_POST, []() {
-        DebugLogger::clear();
-        server.send(200, "application/json", "{\"status\":\"cleared\"}");
-    });
-
-    // API: Reconnect BLE
-    server.on("/api/reconnect-ble", HTTP_POST, []() {
-        bleClient.reconnect();
-        server.send(200, "application/json", "{\"status\":\"reconnecting\"}");
-    });
-
-    // API: Send Raw HEX command over BLE
-    server.on("/api/send-raw-ble", HTTP_POST, []() {
-        if (!server.hasArg("plain")) {
-            server.send(400, "application/json", "{\"error\":\"Missing body\"}");
-            return;
-        }
-        JsonDocument doc;
-        deserializeJson(doc, server.arg("plain"));
-        String hexStr = doc["hex"] | "";
-        hexStr.replace(" ", "");
-        hexStr.replace("0x", "");
-        hexStr.replace("0X", "");
-
-        if (hexStr.length() == 0 || (hexStr.length() % 2 != 0)) {
-            server.send(400, "application/json", "{\"error\":\"Invalid HEX length\"}");
-            return;
-        }
-
-        size_t byteCount = hexStr.length() / 2;
-        std::vector<uint8_t> buf(byteCount);
-        for (size_t i = 0; i < byteCount; ++i) {
-            char bStr[3] = { hexStr[i * 2], hexStr[i * 2 + 1], 0 };
-            buf[i] = (uint8_t)strtoul(bStr, nullptr, 16);
-        }
-
-        bool ok = bleClient.sendRawBle(buf.data(), byteCount);
-        if (ok) {
-            server.send(200, "application/json", "{\"status\":\"ok\",\"bytes\":" + String(byteCount) + "}");
-        } else {
-            server.send(500, "application/json", "{\"status\":\"error\",\"error\":\"Send failed or not connected\"}");
-        }
-    });
-
-    // API: Toggle Switches
+    // API: Switches Control
     server.on("/api/switch", HTTP_POST, []() {
         if (!server.hasArg("plain")) {
-            server.send(400, "application/json", "{\"error\":\"Missing body\"}");
+            server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing body\"}");
+            return;
+        }
+
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, server.arg("plain"));
+        if (err) {
+            server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON\"}");
+            return;
+        }
+
+        String sw = doc["switch"].as<String>();
+        bool state = doc["state"].as<bool>();
+        bool ok = false;
+
+        if (sw == "charging") {
+            ok = g_bleClient.setCharging(state);
+        } else if (sw == "discharging") {
+            ok = g_bleClient.setDischarging(state);
+        } else if (sw == "balancer") {
+            ok = g_bleClient.setBalancer(state);
+        }
+
+        JsonDocument resp;
+        resp["status"] = ok ? "ok" : "failed";
+        resp["switch"] = sw;
+        resp["state"] = state;
+
+        String resStr;
+        serializeJson(resp, resStr);
+        server.send(200, "application/json", resStr);
+    });
+
+    // API: Cell count override
+    server.on("/api/set-cells", HTTP_POST, []() {
+        if (!server.hasArg("plain")) {
+            server.send(400, "application/json", "{\"status\":\"error\"}");
             return;
         }
         JsonDocument doc;
         deserializeJson(doc, server.arg("plain"));
-        const char* sw = doc["switch"];
-        bool state = doc["state"];
-
-        bool ok = bleClient.setSwitch(String(sw), state);
-        if (ok) {
+        uint8_t cells = doc["cells"].as<uint8_t>();
+        if (cells >= 2 && cells <= 32) {
+            g_config.cell_count = cells;
+            ConfigManager::save(g_config);
+            g_bleClient.setTargetConfig(g_config);
             server.send(200, "application/json", "{\"status\":\"ok\"}");
         } else {
-            server.send(500, "application/json", "{\"status\":\"error\"}");
+            server.send(400, "application/json", "{\"status\":\"invalid_cell_count\"}");
         }
     });
 
-    // API: Wi-Fi Scan
+    // API: Wi-Fi Scanner
     server.on("/api/scan-wifi", HTTP_GET, []() {
-        int n = WiFi.scanNetworks(false, false);
+        int n = WiFi.scanNetworks(false, false, false, 150);
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
-        for (int i = 0; i < n; i++) {
-            JsonObject item = arr.add<JsonObject>();
-            item["ssid"] = WiFi.SSID(i);
-            item["rssi"] = WiFi.RSSI(i);
+        for (int i = 0; i < n; ++i) {
+            JsonObject obj = arr.add<JsonObject>();
+            obj["ssid"] = WiFi.SSID(i);
+            obj["rssi"] = WiFi.RSSI(i);
+            obj["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
         }
         WiFi.scanDelete();
-        String out;
-        serializeJson(doc, out);
-        server.send(200, "application/json", out);
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response);
     });
 
-    // API: BLE Scan
+    // API: BLE Scanner
     server.on("/api/scan-ble", HTTP_GET, []() {
-        auto list = bleClient.getDiscoveredDevices();
-        if (list.empty()) {
-            bleClient.performScanSync(4);
-            list = bleClient.getDiscoveredDevices();
-        }
-        JsonDocument doc;
-        JsonArray arr = doc.to<JsonArray>();
-        for (const auto& item : list) {
-            JsonObject obj = arr.add<JsonObject>();
-            obj["name"] = item.name;
-            obj["mac"]  = item.address;
-            obj["rssi"] = item.rssi;
-            obj["type"] = item.bms_type;
-        }
-        String out;
-        serializeJson(doc, out);
-        server.send(200, "application/json", out);
+        String json = g_bleClient.performScanSync(3);
+        server.send(200, "application/json", json);
     });
 
-    // API: Save Config
+    // API: Config Management
+    server.on("/api/config", HTTP_GET, []() {
+        JsonDocument doc;
+        doc["ssid"] = g_config.wifi_ssid;
+        doc["mac"] = g_config.bms_mac;
+        doc["name"] = g_config.bms_name;
+        doc["type"] = g_config.bms_type;
+        doc["pin"] = g_config.bms_pin;
+        doc["cells"] = g_config.cell_count;
+
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response);
+    });
+
     server.on("/api/save-config", HTTP_POST, []() {
         if (!server.hasArg("plain")) {
-            server.send(400, "application/json", "{\"error\":\"Missing body\"}");
+            server.send(400, "application/json", "{\"status\":\"error\"}");
             return;
         }
+
         JsonDocument doc;
-        deserializeJson(doc, server.arg("plain"));
-
-        AppConfig cfg;
-        cfg.wifi_ssid  = doc["ssid"].as<String>();
-        cfg.wifi_pass  = doc["pass"].as<String>();
-        cfg.bms_mac    = doc["mac"].as<String>();
-        cfg.bms_name   = doc["name"] | "BMS Device";
-        cfg.bms_type   = doc["bms_type"] | BMS_TYPE_AUTO;
-        cfg.bms_pin    = doc["pin"] | "123456";
-        cfg.cell_count = doc["cells"] | 4;
-
-        cfg.ts_enabled = doc["ts_enabled"] | true;
-        cfg.ts_hostname = doc["ts_hostname"] | "jbd-bms-probe";
-        if (doc["ts_auth_key"].is<String>() && doc["ts_auth_key"].as<String>().length() > 0) {
-            cfg.ts_auth_key = doc["ts_auth_key"].as<String>();
-        } else {
-            cfg.ts_auth_key = currentConfig.ts_auth_key;
+        DeserializationError err = deserializeJson(doc, server.arg("plain"));
+        if (err) {
+            server.send(400, "application/json", "{\"status\":\"invalid_json\"}");
+            return;
         }
 
-        ConfigManager::save(cfg);
-        server.send(200, "application/json", "{\"status\":\"saved\"}");
-        delay(1000);
-        ESP.restart();
-    });
+        if (!doc["ssid"].isNull()) g_config.wifi_ssid = doc["ssid"].as<String>();
+        if (!doc["pass"].isNull()) {
+            String p = doc["pass"].as<String>();
+            if (p.length() > 0) g_config.wifi_pass = p;
+        }
+        if (!doc["mac"].isNull()) g_config.bms_mac = doc["mac"].as<String>();
+        if (!doc["name"].isNull()) g_config.bms_name = doc["name"].as<String>();
+        if (!doc["type"].isNull()) g_config.bms_type = doc["type"].as<uint8_t>();
+        if (!doc["pin"].isNull()) g_config.bms_pin = doc["pin"].as<String>();
+        if (!doc["cells"].isNull()) g_config.cell_count = doc["cells"].as<uint8_t>();
 
-    // API: Soft-restart Tailscale
-    server.on("/api/restart-tailscale", HTTP_POST, []() {
-#if ENABLE_TAILSCALE
-        server.send(200, "application/json", "{\"status\":\"restarting\"}");
-        restartTailscaleClient();
-#else
-        server.send(400, "application/json", "{\"error\":\"Tailscale not enabled\"}");
-#endif
-    });
+        ConfigManager::save(g_config);
+        g_bleClient.setTargetConfig(g_config);
 
-    // API: Reboot
-    server.on("/api/reboot", HTTP_POST, []() {
-        server.send(200, "application/json", "{\"status\":\"rebooting\"}");
+        server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Saved. Applying...\"}");
+        delay(500);
+
+        // Disconnect and reconnect BLE with new config
+        // If Wi-Fi SSID was modified, restart to connect to new Wi-Fi
+        Serial.println("[Config] New settings saved. Restarting ESP32...");
         delay(500);
         ESP.restart();
     });
 
-    // Web OTA update
+    // OTA Firmware Update
     server.on("/update", HTTP_POST, []() {
         server.sendHeader("Connection", "close");
         server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
@@ -391,7 +303,7 @@ void setupWebServerRoutes() {
     }, []() {
         HTTPUpload& upload = server.upload();
         if (upload.status == UPLOAD_FILE_START) {
-            DebugLogger::info("OTA", "Update Start: " + upload.filename);
+            Serial.printf("[OTA] Update starting: %s\n", upload.filename.c_str());
             if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                 Update.printError(Serial);
             }
@@ -401,144 +313,104 @@ void setupWebServerRoutes() {
             }
         } else if (upload.status == UPLOAD_FILE_END) {
             if (Update.end(true)) {
-                DebugLogger::info("OTA", "Success: " + String(upload.totalSize) + " bytes");
+                Serial.printf("[OTA] Update Success: %u bytes\n", (unsigned int)upload.totalSize);
             } else {
                 Update.printError(Serial);
             }
         }
     });
 
-    server.onNotFound([]() {
-        if (isCaptivePortalRequest()) {
-            server.sendHeader("Location", "http://192.168.4.1/setup", true);
-            server.send(302, "text/plain", "");
+    server.begin();
+    Serial.println("[HTTP] WebServer started on port 80");
+}
+
+#ifndef BUTTON_PIN
+#define BUTTON_PIN 9
+#endif
+
+static uint32_t s_btnPressStartTime = 0;
+static bool s_btnWasPressed = false;
+static bool s_factoryResetTriggered = false;
+
+void handleButton() {
+    bool isPressed = (digitalRead(BUTTON_PIN) == LOW);
+
+    if (isPressed) {
+        if (!s_btnWasPressed) {
+            s_btnWasPressed = true;
+            s_btnPressStartTime = millis();
+            s_factoryResetTriggered = false;
+            Serial.println("[Button] GPIO 9 pressed...");
         } else {
-            server.send(404, "text/plain", "Not Found");
+            uint32_t duration = millis() - s_btnPressStartTime;
+            if (duration >= 3000 && !s_factoryResetTriggered) {
+                s_factoryResetTriggered = true;
+                Serial.println("\n=======================================================");
+                Serial.println("  [Button] LONG PRESS (>3s) -> FACTORY RESET TRIGGERED! ");
+                Serial.println("  Erasing all NVS settings and restarting to AP mode... ");
+                Serial.println("=======================================================\n");
+
+                nvs_flash_erase();
+                nvs_flash_init();
+
+                AppConfig blankCfg;
+                ConfigManager::save(blankCfg);
+                delay(600);
+                ESP.restart();
+            }
         }
-    });
+    } else if (s_btnWasPressed) {
+        uint32_t pressDuration = millis() - s_btnPressStartTime;
+        s_btnWasPressed = false;
+
+        if (!s_factoryResetTriggered && pressDuration >= 50) {
+            Serial.printf("[Button] SHORT PRESS (%u ms) -> Reconnecting BLE...\n", (unsigned int)pressDuration);
+            g_bleClient.reconnect();
+        }
+    }
 }
 
-void startApMode() {
-    isApMode = true;
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP("Universal-BMS-Setup");
-    IPAddress apIP(192, 168, 4, 1);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-    dnsServer.start(DNS_PORT, "*", apIP);
-    DebugLogger::info("WIFI", "Started AP Mode: 'Universal-BMS-Setup' (192.168.4.1)");
-}
-
-void checkBootButton() {
-    if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
-        if (bootPressStart == 0) {
-            bootPressStart = millis();
-        } else if (millis() - bootPressStart > 4000) {
-            DebugLogger::warn("BOOT", "Held > 4s! Factory resetting configuration...");
-            ConfigManager::clear();
-            delay(300);
-            ESP.restart();
-        }
-    } else {
-        if (bootPressStart != 0) {
-            bootPressStart = 0;
-        }
+static void bleWorkerTask(void* param) {
+    Serial.println("[FreeRTOS] BLE Worker Task started (8KB stack)");
+    while (true) {
+        g_bleClient.loop();
+        vTaskDelay(pdMS_TO_TICKS(15));
     }
 }
 
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    DebugLogger::init(120);
+    Serial.println("\n==========================================");
+    Serial.println("  Universal BMS Smart Monitor (ESP32-S3)  ");
+    Serial.println("==========================================");
 
-    Serial.println("\n=========================================");
-    Serial.println("  Universal BMS Diagnostic Probe (ESP32-S3) ");
-    Serial.println("=========================================");
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-    char sysBuf[128];
-    sprintf(sysBuf, "Chip: %s | CPU: %d MHz | Free Heap: %d KB | PSRAM: %d KB / %d KB",
-            ESP.getChipModel(), ESP.getCpuFreqMHz(),
-            ESP.getFreeHeap() / 1024, ESP.getFreePsram() / 1024, ESP.getPsramSize() / 1024);
-    DebugLogger::info("SYSTEM", sysBuf);
+    // Load config from NVS
+    g_config = ConfigManager::load();
+    Serial.printf("[Config] Loaded -> Target MAC: '%s', Type: %u, Cells: %u\n",
+                  g_config.bms_mac.c_str(), g_config.bms_type, g_config.cell_count);
 
-    pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+    // Start BLE Client
+    g_bleClient.init();
+    g_bleClient.setTargetConfig(g_config);
 
-    currentConfig = ConfigManager::load();
-    DebugLogger::info("CONFIG", "SSID: '" + currentConfig.wifi_ssid + "', MAC: '" + currentConfig.bms_mac + 
-                                "', Cells: " + String(currentConfig.cell_count) + "S, PIN: '" + currentConfig.bms_pin + "'");
+    // Setup Wi-Fi & WebServer
+    setupWifi();
+    setupHttpRoutes();
 
-    bleClient.init();
-    bleClient.setTargetConfig(currentConfig);
+    // Start BLE background FreeRTOS task so WebServer is NEVER blocked by BLE
+    xTaskCreate(bleWorkerTask, "ble_worker", 8192, NULL, 1, NULL);
 
-    if (currentConfig.wifi_ssid.length() > 0) {
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(currentConfig.wifi_ssid.c_str(), currentConfig.wifi_pass.c_str());
-        DebugLogger::info("WIFI", "Connecting to '" + currentConfig.wifi_ssid + "'...");
-
-        uint32_t startAttempt = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
-            delay(500);
-            Serial.print(".");
-        }
-        Serial.println();
-
-        if (WiFi.status() == WL_CONNECTED) {
-            DebugLogger::info("WIFI", "Connected! IP: " + WiFi.localIP().toString());
-            if (MDNS.begin(currentConfig.ts_hostname.c_str())) {
-                MDNS.addService("http", "tcp", 80);
-            }
-#if ENABLE_TAILSCALE
-            startTailscaleClient();
-#endif
-        } else {
-            DebugLogger::warn("WIFI", "Connection timeout. Fallback to AP Mode");
-            startApMode();
-        }
-    } else {
-        DebugLogger::info("WIFI", "No SSID configured. Starting AP Mode");
-        startApMode();
-    }
-
-    setupWebServerRoutes();
-    server.begin();
-    DebugLogger::info("HTTP", "WebServer started on port 80");
+    Serial.println("[System] Initialization complete. BOOT button: Short click = Reconnect BLE, Long click (>3s) = Factory Reset.");
 }
 
 void loop() {
-    checkBootButton();
-
-    if (isApMode) {
+    handleButton();
+    if (g_isApMode) {
         dnsServer.processNextRequest();
     }
-
     server.handleClient();
-    bleClient.loop();
-
-#if ENABLE_TAILSCALE
-    static uint32_t derpDisconnectedStartMs = 0;
-    if (currentConfig.ts_enabled && WiFi.status() == WL_CONNECTED && mlHandle != nullptr) {
-        bool derpOk = mlHandle->derp.connected;
-        if (derpOk) {
-            derpDisconnectedStartMs = 0;
-        } else {
-            if (derpDisconnectedStartMs == 0) {
-                derpDisconnectedStartMs = millis();
-            } else if (millis() - derpDisconnectedStartMs >= 360000) {
-                DebugLogger::warn("TAILSCALE", "Watchdog alert: DERP disconnected > 360s! Soft restart...");
-                derpDisconnectedStartMs = millis();
-                restartTailscaleClient();
-            }
-        }
-    } else {
-        derpDisconnectedStartMs = 0;
-    }
-#endif
-
-    static uint32_t lastHb = 0;
-    if (millis() - lastHb > 60000) {
-        lastHb = millis();
-        char hbBuf[128];
-        sprintf(hbBuf, "RSSI=%d dBm, Free Heap=%d KB, Free PSRAM=%d KB",
-                WiFi.RSSI(), ESP.getFreeHeap() / 1024, ESP.getFreePsram() / 1024);
-        DebugLogger::info("SYS", hbBuf);
-    }
+    delay(2);
 }
