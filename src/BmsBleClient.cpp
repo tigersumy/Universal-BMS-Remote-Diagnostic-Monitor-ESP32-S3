@@ -17,6 +17,37 @@ class BmsClientCallbacks : public NimBLEClientCallbacks {
             s_pInstance->disconnect();
         }
     }
+
+    void onPassKeyEntry(NimBLEConnInfo& connInfo) override {
+        uint32_t pin = 123456;
+        if (s_pInstance && s_pInstance->getConfig().bms_pin.length() > 0) {
+            pin = s_pInstance->getConfig().bms_pin.toInt();
+        }
+        DebugLogger::info("SEC", "BLE Passkey requested -> injecting PIN: " + String(pin));
+        NimBLEDevice::injectPassKey(connInfo, pin);
+    }
+
+    uint32_t onPassKeyDisplay(NimBLEConnInfo& connInfo) override {
+        uint32_t pin = 123456;
+        if (s_pInstance && s_pInstance->getConfig().bms_pin.length() > 0) {
+            pin = s_pInstance->getConfig().bms_pin.toInt();
+        }
+        DebugLogger::info("SEC", "BLE Passkey display -> returning PIN: " + String(pin));
+        return pin;
+    }
+
+    void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
+        if (connInfo.isEncrypted()) {
+            DebugLogger::info("SEC", "BLE Pairing / Authentication SUCCESSFUL (Encrypted link established)");
+        } else {
+            DebugLogger::warn("SEC", "BLE Pairing finished (Unencrypted link)");
+        }
+    }
+
+    void onConfirmPasskey(NimBLEConnInfo& connInfo, uint32_t pin) override {
+        DebugLogger::info("SEC", "BLE Confirm Passkey PIN: " + String(pin));
+        NimBLEDevice::injectConfirmPasskey(connInfo, true);
+    }
 };
 
 class BmsScanCallbacks : public NimBLEScanCallbacks {
@@ -84,13 +115,15 @@ BmsBleClient::BmsBleClient() {
 bool BmsBleClient::init() {
     NimBLEDevice::init("Universal-BMS-Probe");
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-    NimBLEDevice::setSecurityAuth(false, false, false);
+    NimBLEDevice::setSecurityAuth(true, true, false);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
+    NimBLEDevice::setSecurityPasskey(123456);
     NimBLEScan* pScan = NimBLEDevice::getScan();
     pScan->setScanCallbacks(new BmsScanCallbacks());
     pScan->setActiveScan(true);
     pScan->setInterval(160);
     pScan->setWindow(40);
-    DebugLogger::info(TAG, "BLE Client Initialized (P9 power, active scan)");
+    DebugLogger::info(TAG, "BLE Client Initialized (P9 power, active scan, SMP passkey security enabled)");
     return true;
 }
 
@@ -218,11 +251,17 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
         return false;
     }
 
+    if (m_config.bms_pin.length() > 0) {
+        DebugLogger::info(TAG, "Securing BLE connection with Passkey: " + m_config.bms_pin);
+        m_pClient->secureConnection();
+    }
+
     DebugLogger::info(TAG, "Connected! Discovering all services & characteristics...");
     m_rxBuffer.clear();
 
     std::vector<NimBLERemoteService*> services = m_pClient->getServices(true);
-    NimBLERemoteService* pJbdService = nullptr;
+    std::vector<NimBLERemoteCharacteristic*> notifyChars;
+    std::vector<NimBLERemoteCharacteristic*> writeChars;
     NimBLERemoteService* pJkService = nullptr;
 
     for (auto* s : services) {
@@ -230,96 +269,97 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
         sUuid.toLowerCase();
         DebugLogger::info("DISC", "Found Service: " + sUuid);
 
-        if (sUuid.indexOf("ff00") >= 0 || sUuid.indexOf("fff0") >= 0 || sUuid.indexOf("fee7") >= 0 || sUuid.indexOf("6e40") >= 0) {
-            pJbdService = s;
-        } else if (sUuid.indexOf("ffe0") >= 0) {
+        if (sUuid.indexOf("ffe0") >= 0) {
             pJkService = s;
+        }
+
+        for (auto* c : s->getCharacteristics(true)) {
+            String cUuid = c->getUUID().toString().c_str();
+            cUuid.toLowerCase();
+            char cBuf[160];
+            sprintf(cBuf, "Svc [%s] Char [%s] H:%d [Notify:%d, Indic:%d, Wr:%d, WrNoResp:%d]",
+                    sUuid.c_str(), cUuid.c_str(), c->getHandle(), c->canNotify(), c->canIndicate(), c->canWrite(), c->canWriteNoResponse());
+            DebugLogger::info("DISC", cBuf);
+
+            if (c->canNotify() || c->canIndicate() || cUuid.indexOf("ff01") >= 0 || cUuid.indexOf("fff1") >= 0 || cUuid.indexOf("0002") >= 0) {
+                notifyChars.push_back(c);
+            }
+            if (c->canWrite() || c->canWriteNoResponse() || cUuid.indexOf("ff02") >= 0 || cUuid.indexOf("fff2") >= 0 || cUuid.indexOf("0003") >= 0) {
+                writeChars.push_back(c);
+            }
         }
     }
 
-    // 1. Process JBD Service
-    if (pJbdService && (forcedType == BMS_TYPE_AUTO || forcedType == BMS_TYPE_JBD)) {
-        DebugLogger::info(TAG, "Selected JBD Service (" + String(pJbdService->getUUID().toString().c_str()) + ")");
-        m_pJbdNotifyChar = nullptr;
-        m_pJbdWriteChar  = nullptr;
+    // 1. Process JBD (if not JK service or if forcedType is JBD)
+    if (!notifyChars.empty() && !writeChars.empty() && (forcedType == BMS_TYPE_AUTO || forcedType == BMS_TYPE_JBD) && (!pJkService || forcedType == BMS_TYPE_JBD)) {
+        m_pJbdNotifyChar = notifyChars[0];
+        m_pJbdWriteChar  = writeChars[0];
 
-        for (auto* c : pJbdService->getCharacteristics(true)) {
-            String uuid = c->getUUID().toString().c_str();
-            uuid.toLowerCase();
-            char cBuf[160];
-            sprintf(cBuf, "Char %s [H:%d, Notify:%d, Indic:%d, Wr:%d, WrNoResp:%d]",
-                    uuid.c_str(), c->getHandle(), c->canNotify(), c->canIndicate(), c->canWrite(), c->canWriteNoResponse());
-            DebugLogger::info("DISC", cBuf);
-
-            if (uuid.indexOf("ff01") >= 0 || uuid.indexOf("fff1") >= 0 || uuid.indexOf("6e400003") >= 0 || c->canNotify() || c->canIndicate()) {
-                if (!m_pJbdNotifyChar) m_pJbdNotifyChar = c;
+        // Prefer FF01/FF02 if available
+        for (auto* c : notifyChars) {
+            String u = c->getUUID().toString().c_str();
+            u.toLowerCase();
+            if (u.indexOf("ff01") >= 0 || u.indexOf("fff1") >= 0 || u.indexOf("0002") >= 0) {
+                m_pJbdNotifyChar = c;
+                break;
             }
-            if (uuid.indexOf("ff02") >= 0 || uuid.indexOf("fff2") >= 0 || uuid.indexOf("6e400002") >= 0 || c->canWrite() || c->canWriteNoResponse()) {
-                if (!m_pJbdWriteChar) m_pJbdWriteChar = c;
+        }
+        for (auto* c : writeChars) {
+            String u = c->getUUID().toString().c_str();
+            u.toLowerCase();
+            if (u.indexOf("ff02") >= 0 || u.indexOf("fff2") >= 0 || u.indexOf("0003") >= 0) {
+                m_pJbdWriteChar = c;
+                break;
             }
         }
 
-        if (!m_pJbdWriteChar && m_pJbdNotifyChar && (m_pJbdNotifyChar->canWrite() || m_pJbdNotifyChar->canWriteNoResponse())) {
-            m_pJbdWriteChar = m_pJbdNotifyChar;
-        }
+        m_jbdWriteWithResponse = m_pJbdWriteChar->canWrite() && !m_pJbdWriteChar->canWriteNoResponse();
+        DebugLogger::info(TAG, "Selected JBD Primary: Notify H:" + String(m_pJbdNotifyChar->getHandle()) + 
+                              ", Write H:" + String(m_pJbdWriteChar->getHandle()) + 
+                              " (WithResponse: " + String(m_jbdWriteWithResponse) + ")");
 
-        if (m_pJbdNotifyChar && m_pJbdWriteChar) {
-            m_jbdWriteWithResponse = m_pJbdWriteChar->canWrite() && !m_pJbdWriteChar->canWriteNoResponse();
-            DebugLogger::info(TAG, "JBD Configured: Notify H:" + String(m_pJbdNotifyChar->getHandle()) + 
-                                  ", Write H:" + String(m_pJbdWriteChar->getHandle()) + 
-                                  " (WithResponse: " + String(m_jbdWriteWithResponse) + ")");
-
-            m_pJbdNotifyChar->subscribe(true, [this](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+        // Subscribe to all notification candidates
+        for (auto* nc : notifyChars) {
+            bool subRes = nc->subscribe(true, [this](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
                 this->handleJbdPacket(pData, length);
             });
-
-            m_isConnected = true;
-            m_telemetry.connected = true;
-            m_telemetry.bms_type = "JBD-BMS";
-            m_telemetry.device_name = name.length() > 0 ? name : "JBD-BMS";
-            m_telemetry.mac_address = address.toString().c_str();
-            m_telemetry.last_update = millis();
-
-            // Authentication & Initialization Sequence
-            // A) Configured PIN authentication frame (e.g. 123456 or user defined)
-            String pinToTry = m_config.bms_pin.length() > 0 ? m_config.bms_pin : "123456";
-            uint8_t pinLen = pinToTry.length();
-            if (pinLen > 16) pinLen = 16;
-            uint8_t customPinFrame[32];
-            customPinFrame[0] = 0xFF;
-            customPinFrame[1] = 0xAA;
-            customPinFrame[2] = 0x15;
-            customPinFrame[3] = pinLen;
-            uint8_t sum = 0x15 + pinLen;
-            for (size_t i = 0; i < pinLen; ++i) {
-                customPinFrame[4 + i] = pinToTry[i];
-                sum += pinToTry[i];
-            }
-            customPinFrame[4 + pinLen] = sum;
-            DebugLogger::logTx(TAG, customPinFrame, 4 + pinLen + 1, "JBD PIN Auth ('" + pinToTry + "')");
-            m_pJbdWriteChar->writeValue(customPinFrame, 4 + pinLen + 1, m_jbdWriteWithResponse);
-            delay(80);
-
-            // B) Fallback 4-digit PIN "1234" frame if configured PIN is not 1234
-            if (pinToTry != "1234") {
-                uint8_t pin1234Frame[] = { 0xFF, 0xAA, 0x15, 0x04, 0x31, 0x32, 0x33, 0x34, 0x47 };
-                DebugLogger::logTx(TAG, pin1234Frame, sizeof(pin1234Frame), "Fallback PIN Auth ('1234')");
-                m_pJbdWriteChar->writeValue(pin1234Frame, sizeof(pin1234Frame), m_jbdWriteWithResponse);
-                delay(80);
-            }
-
-            // C) Status query (0x19)
-            uint8_t statusFrame[] = { 0xFF, 0xAA, 0x19, 0x01, 0x01, 0x1B };
-            DebugLogger::logTx(TAG, statusFrame, sizeof(statusFrame), "JBD Status Query (0x19)");
-            m_pJbdWriteChar->writeValue(statusFrame, sizeof(statusFrame), m_jbdWriteWithResponse);
-            delay(100);
-
-            // D) Direct register requests (Basic Info 0x03 & Cell Voltages 0x04)
-            sendJbdCommand(0xA5, 0x03);
-            delay(100);
-            sendJbdCommand(0xA5, 0x04);
-            return true;
+            DebugLogger::info(TAG, "Subscribed to H:" + String(nc->getHandle()) + " (" + String(nc->getUUID().toString().c_str()) + ") -> Status: " + String(subRes ? "SUCCESS" : "FAILED"));
         }
+
+        m_isConnected = true;
+        m_telemetry.connected = true;
+        m_telemetry.bms_type = "JBD-BMS";
+        m_telemetry.device_name = name.length() > 0 ? name : "JBD-BMS";
+        m_telemetry.mac_address = address.toString().c_str();
+        m_telemetry.last_update = millis();
+
+        // Standard JBD Interrogation:
+        // First try standard query 0x03 & 0x04 without noisy AT frames
+        sendJbdCommand(0xA5, 0x03);
+        delay(80);
+        sendJbdCommand(0xA5, 0x04);
+        delay(80);
+
+        // Also send standard PIN unlock register (0x01) if PIN is configured
+        String pinToTry = m_config.bms_pin.length() > 0 ? m_config.bms_pin : "123456";
+        if (pinToTry.length() == 6) {
+            uint8_t pinFrame[13];
+            pinFrame[0] = 0xDD;
+            pinFrame[1] = 0x5A;
+            pinFrame[2] = 0x01; // Register 0x01 = Password
+            pinFrame[3] = 0x06;
+            for (int i = 0; i < 6; ++i) pinFrame[4 + i] = pinToTry[i];
+            uint32_t sum = 0x01 + 0x06;
+            for (int i = 0; i < 6; ++i) sum += pinToTry[i];
+            uint16_t crc = (uint16_t)(0x10000 - sum);
+            pinFrame[10] = (uint8_t)(crc >> 8);
+            pinFrame[11] = (uint8_t)(crc & 0xFF);
+            pinFrame[12] = 0x77;
+            DebugLogger::logTx(TAG, pinFrame, 13, "JBD Reg 0x01 PIN Unlock ('" + pinToTry + "')");
+            m_pJbdWriteChar->writeValue(pinFrame, 13, m_jbdWriteWithResponse);
+        }
+
+        return true;
     }
 
     // 2. Process JK Service (0xFFE0)

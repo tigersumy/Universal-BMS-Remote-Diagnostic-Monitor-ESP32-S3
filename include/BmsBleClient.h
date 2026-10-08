@@ -32,6 +32,7 @@ public:
 
     bool isConnected() const { return m_isConnected; }
     const BmsTelemetry& getTelemetry() const { return m_telemetry; }
+    const AppConfig& getConfig() const { return m_config; }
 
     bool setSwitch(const String& sw, bool state);
     bool sendRawBle(const uint8_t* data, size_t len);
