@@ -162,11 +162,15 @@ pio run -t upload
 
 ## 🤝 Acknowledgements & Credits
 
-This project builds upon and integrates several exceptional open-source libraries:
+This project builds upon and integrates several exceptional open-source libraries, protocol reverse-engineering efforts, and community research:
 - **[MicroLink by CamM2325](https://github.com/CamM2325/microlink):** The embedded Tailscale client implementation for ESP32 (ts2021 control protocol, Noise IK mutual authentication, DERP relay protocol, and magicsock architecture) is adapted from the MicroLink project.
 - **[wireguard-lwip by Daniel Hope](https://github.com/djp952/wireguard-lwip):** Lightweight WireGuard implementation for lwIP providing ChaCha20-Poly1305, BLAKE2s, and Curve25519 cryptographic primitives.
 - **[NimBLE-Arduino by h2zero](https://github.com/h2zero/NimBLE-Arduino):** Memory-efficient Bluetooth Low Energy stack for ESP32.
 - **[ArduinoJson by Benoît Blanchon](https://arduinojson.org/):** High-performance JSON parser for embedded systems.
+- **[sshoecraft/jbdtool](https://github.com/sshoecraft/jbdtool):** Reference C implementation for Linux/Embedded monitoring and configuration of JBD BMS. Provides a comprehensive EEPROM register map, configuration parameters, capacity calibration routines, and robust timeout handling logic.
+- **[syssi/esphome-jbd-bms](https://github.com/syssi/esphome-jbd-bms):** Modern reference implementation for the ESP32 / ESPHome ecosystem. Provides validated algorithms for handling fragmented UART/BLE packet streams, full 16-bit protection/fault mask decoding, and MOSFET charge/discharge (`0xE1`) and balancer (`0xE2`) switching logic.
+- **[wholybee/esp32-smartBMSdisplay](https://github.com/wholybee/esp32-smartBMSdisplay):** Practical ESP32 BLE implementation covering `0xFF00` / `0xFFF0` / `0xFEE7` GATT services, request queue processing, and alarm/disconnect handling patterns.
+- **[ieb/N2KLifePo4 (JBD-BMS-SERIAL-INTERFACE.md)](https://github.com/ieb/N2KLifePo4/blob/main/JBD-BMS-SERIAL-INTERFACE.md):** Clean, structured specification and register reference for the JBD serial interface detailing byte offsets, data formats (U16, S16), scaling factors, and measurement units (10 mV, 10 mA, 0.1 K, 10 mAh).
 
 ---
 
