@@ -145,6 +145,14 @@ void setupWebServerRoutes() {
         server.send_P(200, "text/html", SETUP_HTML);
     });
 
+    // English routes
+    server.on("/en", HTTP_GET, []() {
+        server.send_P(200, "text/html", INDEX_HTML);
+    });
+    server.on("/setup/en", HTTP_GET, []() {
+        server.send_P(200, "text/html", SETUP_HTML);
+    });
+
     // Captive Portal Redirects
     server.on("/generate_204", HTTP_GET, []() {
         server.sendHeader("Location", "http://192.168.4.1/setup", true);
@@ -181,6 +189,10 @@ void setupWebServerRoutes() {
         doc["discharge_power"] = t.discharge_power;
         doc["soc"] = t.soc;
         doc["capacity_remain"] = t.capacity_remain;
+        doc["capacity_total"]  = t.capacity_total;
+        doc["capacity_nominal_setting"] = t.capacity_nominal_setting;
+        doc["capacity_cycle_setting"]   = t.capacity_cycle_setting;
+        doc["cell_full_voltage_setting"] = t.cell_full_voltage_setting;
         doc["cycle_count"] = t.cycle_count;
         doc["cell_count"] = t.cell_count;
 
@@ -311,6 +323,58 @@ void setupWebServerRoutes() {
             server.send(200, "application/json", "{\"status\":\"ok\"}");
         } else {
             server.send(500, "application/json", "{\"status\":\"error\"}");
+        }
+    });
+
+    // API: Get BMS EEPROM parameters
+    server.on("/api/bms/params", HTTP_GET, []() {
+        const auto& t = bleClient.getTelemetry();
+        JsonDocument doc;
+        doc["bms_type"] = t.bms_type;
+        doc["connected"] = bleClient.isConnected();
+        doc["nominal_ah"] = (t.capacity_nominal_setting > 0) ? t.capacity_nominal_setting : t.capacity_total;
+        doc["cycle_ah"] = (t.capacity_cycle_setting > 0) ? t.capacity_cycle_setting : (doc["nominal_ah"].as<float>() * 0.8f);
+        doc["cell_count"] = t.cell_count;
+        doc["full_mv"] = t.cell_full_voltage_setting;
+        String out;
+        serializeJson(doc, out);
+        server.send(200, "application/json", out);
+    });
+
+    // API: Trigger reading EEPROM parameters from JBD BMS
+    server.on("/api/bms/read_params", HTTP_POST, []() {
+        bool ok = bleClient.readJbdCapacityParams();
+        if (ok) {
+            server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"EEPROM read requested\"}");
+        } else {
+            server.send(400, "application/json", "{\"status\":\"error\",\"error\":\"BMS not connected or not JBD\"}");
+        }
+    });
+
+    // API: Write BMS EEPROM parameters
+    server.on("/api/bms/params", HTTP_POST, []() {
+        if (!server.hasArg("plain")) {
+            server.send(400, "application/json", "{\"error\":\"Missing body\"}");
+            return;
+        }
+        JsonDocument doc;
+        deserializeJson(doc, server.arg("plain"));
+
+        float nominalAh = doc["nominal_ah"] | 0.0f;
+        float cycleAh   = doc["cycle_ah"] | (nominalAh * 0.8f);
+        uint8_t cellCount = doc["cell_count"] | currentConfig.cell_count;
+        uint16_t fullMv   = doc["full_mv"] | 3500;
+
+        if (nominalAh <= 0.0f) {
+            server.send(400, "application/json", "{\"status\":\"error\",\"error\":\"Invalid nominal_ah\"}");
+            return;
+        }
+
+        bool ok = bleClient.writeJbdCapacityParams(nominalAh, cycleAh, cellCount, fullMv);
+        if (ok) {
+            server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"EEPROM parameters updated successfully\"}");
+        } else {
+            server.send(500, "application/json", "{\"status\":\"error\",\"error\":\"Write failed or not connected to JBD\"}");
         }
     });
 

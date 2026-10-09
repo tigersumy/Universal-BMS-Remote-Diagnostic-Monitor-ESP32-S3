@@ -37,11 +37,15 @@ public:
     bool setSwitch(const String& sw, bool state);
     bool sendRawBle(const uint8_t* data, size_t len);
 
+    bool readJbdCapacityParams();
+    bool writeJbdCapacityParams(float nominalAh, float cycleAh, uint8_t cellCount, uint16_t fullMv);
+
 private:
     void sendJbdCommand(uint8_t cmd, uint8_t reg, const uint8_t* payload = nullptr, uint8_t len = 0);
     void handleJbdPacket(const uint8_t* data, size_t len);
     void decodeJbdTelemetry(const std::vector<uint8_t>& data);
     void decodeJbdCells(const std::vector<uint8_t>& data);
+    void decodeJbdEeprom(uint8_t reg, const std::vector<uint8_t>& data);
 
     void sendJkPollRequest();
     void handleJkPacket(const uint8_t* data, size_t len);

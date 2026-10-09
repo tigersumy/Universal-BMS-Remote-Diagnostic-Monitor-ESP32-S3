@@ -82,10 +82,14 @@ Once connected to the local Wi-Fi network, the device joins your Tailnet automat
 | `POST`| `/api/reconnect-ble` | Force BLE peripheral reconnection |
 | `POST`| `/api/clear-log` | Clear in-memory diagnostic log buffer |
 | `POST`| `/api/switch` | Toggle charge/discharge protection MOSFETs (`{"switch":"charging","state":true}`) |
+| `GET` | `/api/bms/params` | Read configured EEPROM capacity parameters (Nominal Ah, Cycle Ah, Cells, Full mV) |
+| `POST`| `/api/bms/read_params` | Query EEPROM configuration registers from JBD BMS (`0x10`, `0x11`, `0x2F`, `0x12`) |
+| `POST`| `/api/bms/params` | Write capacity settings into JBD EEPROM via Factory Mode (`0x00` -> `0x01`) |
 | `GET` | `/api/scan-ble` | Scan Bluetooth air for JK/JBD battery systems |
 | `GET` | `/api/scan-wifi` | Scan available 2.4 GHz Wi-Fi networks |
 | `POST`| `/api/save-config` | Save parameters into NVS and reboot |
 | `POST`| `/update` | Web OTA multipart firmware binary upload |
+| `GET` | `/en` | Direct English version of the diagnostic web dashboard |
 
 ---
 ---

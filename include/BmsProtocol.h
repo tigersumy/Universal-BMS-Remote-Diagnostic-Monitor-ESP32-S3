@@ -20,6 +20,11 @@ struct BmsTelemetry {
     uint32_t cycle_count = 0;
     float    cycle_capacity = 0.0f;
 
+    // Configuration / EEPROM parameters
+    float    capacity_nominal_setting = 0.0f; // Ah
+    float    capacity_cycle_setting = 0.0f;   // Ah
+    uint16_t cell_full_voltage_setting = 3500;// mV
+
     uint8_t  cell_count = 4;
     float    cell_voltages[32] = {0};
     uint8_t  min_cell_idx = 1;

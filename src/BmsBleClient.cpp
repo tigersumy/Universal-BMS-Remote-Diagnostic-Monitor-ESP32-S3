@@ -433,17 +433,22 @@ void BmsBleClient::reconnect() {
 
 bool BmsBleClient::sendRawBle(const uint8_t* data, size_t len) {
     if (!m_isConnected) {
-        DebugLogger::error(TAG, "sendRawBle failed: not connected");
+        DebugLogger::error(TAG, "sendRawBle failed: not connected to any BMS");
         return false;
     }
-    if (m_telemetry.bms_type == "JBD-BMS" && m_pJbdWriteChar) {
+    if (m_pJbdWriteChar) {
         DebugLogger::logTx(TAG, data, len, "Raw JBD Frame");
-        return m_pJbdWriteChar->writeValue(data, len, m_jbdWriteWithResponse);
+        bool ok = m_pJbdWriteChar->writeValue(data, len, false);
+        if (!ok && m_pJbdWriteChar->canWrite()) {
+            ok = m_pJbdWriteChar->writeValue(data, len, true);
+        }
+        return ok;
     }
-    if (m_telemetry.bms_type == "JK-BMS" && m_pJkWriteChar) {
+    if (m_pJkWriteChar) {
         DebugLogger::logTx(TAG, data, len, "Raw JK Frame");
         return m_pJkWriteChar->writeValue(data, len, false);
     }
+    DebugLogger::error(TAG, "sendRawBle failed: no active write characteristic");
     return false;
 }
 
@@ -552,7 +557,36 @@ void BmsBleClient::handleJbdPacket(const uint8_t* data, size_t len) {
                 m_telemetry.device_name = devName;
                 DebugLogger::info(TAG, "JBD Device Name: " + devName);
             }
+        } else if (reg == 0x10 || reg == 0x11 || reg == 0x2F || reg == 0x12 || reg == 0x20) {
+            decodeJbdEeprom(reg, frame);
         }
+    }
+}
+
+void BmsBleClient::decodeJbdEeprom(uint8_t reg, const std::vector<uint8_t>& data) {
+    if (data.size() < 6) return;
+    uint8_t dataLen = data[3];
+    auto get16 = [&](size_t idx) -> uint16_t {
+        return (uint16_t(data[idx]) << 8) | uint16_t(data[idx + 1]);
+    };
+
+    if (reg == 0x10 && dataLen >= 2) { // design_cap (10mAh)
+        m_telemetry.capacity_nominal_setting = (float)get16(4) * 0.01f;
+        m_telemetry.capacity_total = m_telemetry.capacity_nominal_setting;
+        DebugLogger::info(TAG, "EEPROM Read: Nominal Capacity = " + String(m_telemetry.capacity_nominal_setting, 2) + " Ah");
+    } else if (reg == 0x11 && dataLen >= 2) { // cycle_cap (10mAh)
+        m_telemetry.capacity_cycle_setting = (float)get16(4) * 0.01f;
+        m_telemetry.cycle_capacity = m_telemetry.capacity_cycle_setting;
+        DebugLogger::info(TAG, "EEPROM Read: Cycle Capacity = " + String(m_telemetry.capacity_cycle_setting, 2) + " Ah");
+    } else if (reg == 0x2F && dataLen >= 1) { // cell_cnt
+        uint8_t cnt = (dataLen >= 2) ? data[5] : data[4];
+        if (cnt >= 3 && cnt <= 32) {
+            m_telemetry.cell_count = cnt;
+            DebugLogger::info(TAG, "EEPROM Read: Cell Count = " + String(cnt) + "S");
+        }
+    } else if ((reg == 0x12 || reg == 0x20) && dataLen >= 2) { // Full charge voltage / cell overvoltage threshold (mV)
+        m_telemetry.cell_full_voltage_setting = get16(4);
+        DebugLogger::info(TAG, "EEPROM Read: Cell Full Voltage = " + String(m_telemetry.cell_full_voltage_setting) + " mV");
     }
 }
 
@@ -891,4 +925,111 @@ bool BmsBleClient::setSwitch(const String& sw, bool state) {
         }
     }
     return false;
+}
+
+bool BmsBleClient::readJbdCapacityParams() {
+    if (!m_isConnected || m_telemetry.bms_type != "JBD-BMS") {
+        DebugLogger::warn(TAG, "readJbdCapacityParams failed: not connected to JBD BMS");
+        return false;
+    }
+    DebugLogger::info(TAG, "Reading JBD EEPROM configuration parameters...");
+
+    // 1. Enter factory mode
+    uint8_t enterPayload[2] = { 0x56, 0x78 };
+    sendJbdCommand(0x5A, 0x00, enterPayload, 2);
+    delay(50);
+
+    // 2. Read design_cap (0x10), cycle_cap (0x11), cell_cnt (0x2F), full_voltage (0x12)
+    sendJbdCommand(0xA5, 0x10);
+    delay(50);
+    sendJbdCommand(0xA5, 0x11);
+    delay(50);
+    sendJbdCommand(0xA5, 0x2F);
+    delay(50);
+    sendJbdCommand(0xA5, 0x12);
+    delay(50);
+
+    // 3. Exit factory mode (without writing 0x2828)
+    uint8_t exitPayload[2] = { 0x00, 0x00 };
+    sendJbdCommand(0x5A, 0x01, exitPayload, 2);
+    return true;
+}
+
+bool BmsBleClient::writeJbdCapacityParams(float nominalAh, float cycleAh, uint8_t cellCount, uint16_t fullMv) {
+    if (!m_isConnected || m_telemetry.bms_type != "JBD-BMS") {
+        DebugLogger::warn(TAG, "writeJbdCapacityParams failed: not connected to JBD BMS");
+        return false;
+    }
+
+    char logBuf[160];
+    sprintf(logBuf, "Writing JBD EEPROM: Nom=%.1fAh, Cyc=%.1fAh, Cells=%dS, Full=%dmV", nominalAh, cycleAh, cellCount, fullMv);
+    DebugLogger::info(TAG, logBuf);
+
+    // 1. Enter factory mode (0x00 -> 0x5678)
+    uint8_t enterPayload[2] = { 0x56, 0x78 };
+    sendJbdCommand(0x5A, 0x00, enterPayload, 2);
+    delay(100);
+
+    // 2. Write Nominal Capacity (0x10, unit: 10mAh -> val = Ah * 100)
+    if (nominalAh > 0.5f) {
+        uint16_t nomVal = (uint16_t)(nominalAh * 100.0f);
+        uint8_t pNom[2] = { (uint8_t)(nomVal >> 8), (uint8_t)(nomVal & 0xFF) };
+        sendJbdCommand(0x5A, 0x10, pNom, 2);
+        delay(80);
+    }
+
+    // 3. Write Cycle Capacity (0x11, unit: 10mAh -> val = Ah * 100)
+    if (cycleAh > 0.5f) {
+        uint16_t cycVal = (uint16_t)(cycleAh * 100.0f);
+        uint8_t pCyc[2] = { (uint8_t)(cycVal >> 8), (uint8_t)(cycVal & 0xFF) };
+        sendJbdCommand(0x5A, 0x11, pCyc, 2);
+        delay(80);
+    }
+
+    // 4. Write Cell Count (0x2F)
+    if (cellCount >= 3 && cellCount <= 32) {
+        uint8_t pCnt[2] = { 0x00, cellCount };
+        sendJbdCommand(0x5A, 0x2F, pCnt, 2);
+        delay(80);
+    }
+
+    // 5. Write Full / Overvoltage threshold (0x12)
+    if (fullMv >= 2000 && fullMv <= 4500) {
+        uint8_t pMv[2] = { (uint8_t)(fullMv >> 8), (uint8_t)(fullMv & 0xFF) };
+        sendJbdCommand(0x5A, 0x12, pMv, 2);
+        delay(80);
+    }
+
+    // 6. Write RAM remaining capacity (0xE0) to immediately update gauge
+    if (nominalAh > 0.5f) {
+        uint16_t remVal = (uint16_t)(nominalAh * 100.0f);
+        uint8_t pRem[2] = { (uint8_t)(remVal >> 8), (uint8_t)(remVal & 0xFF) };
+        sendJbdCommand(0x5A, 0xE0, pRem, 2);
+        delay(80);
+    }
+
+    // 7. Exit Factory Mode & Save to EEPROM (0x01 -> 0x2828)
+    uint8_t exitPayload[2] = { 0x28, 0x28 };
+    sendJbdCommand(0x5A, 0x01, exitPayload, 2);
+    delay(100);
+
+    // Update local telemetry
+    if (nominalAh > 0.5f) {
+        m_telemetry.capacity_nominal_setting = nominalAh;
+        m_telemetry.capacity_total = nominalAh;
+    }
+    if (cycleAh > 0.5f) {
+        m_telemetry.capacity_cycle_setting = cycleAh;
+        m_telemetry.cycle_capacity = cycleAh;
+    }
+    if (cellCount >= 3 && cellCount <= 32) {
+        m_telemetry.cell_count = cellCount;
+    }
+    if (fullMv >= 2000 && fullMv <= 4500) {
+        m_telemetry.cell_full_voltage_setting = fullMv;
+    }
+
+    // Re-query telemetry
+    sendJbdCommand(0xA5, 0x03);
+    return true;
 }
