@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 
+#include <esp_mac.h>
+
 #define BMS_TYPE_AUTO 0
 #define BMS_TYPE_JK   1
 #define BMS_TYPE_JBD  2
@@ -16,12 +18,22 @@ struct AppConfig {
     String  bms_pin;     // Default "123456"
     uint8_t cell_count;  // 4, 8, 16, 24
     bool    ts_enabled;  // Tailscale VPN enabled
-    String  ts_hostname; // Default "jbd-bms-probe"
+    String  ts_hostname; // e.g. "jbd-bms-probe-c9b4"
     String  ts_auth_key; // Tailscale Auth Key
 };
 
 class ConfigManager {
 public:
+    static String getDefaultHostname() {
+        uint8_t mac[6];
+        if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "jbd-bms-probe-%02x%02x", mac[4], mac[5]);
+            return String(buf);
+        }
+        return "jbd-bms-probe";
+    }
+
     static AppConfig load() {
         Preferences prefs;
         prefs.begin("bms_probe", true);
@@ -35,9 +47,12 @@ public:
         cfg.bms_pin     = prefs.getString("pin", "123456");
         cfg.cell_count  = prefs.getUChar("cells", 4);
         cfg.ts_enabled  = prefs.getBool("ts_en", true);
-        cfg.ts_hostname = prefs.getString("ts_host", "jbd-bms-probe");
+        cfg.ts_hostname = prefs.getString("ts_host", "");
         cfg.ts_auth_key = prefs.getString("ts_key", "tskey-auth-kKU7ahB6hj11CNTRL-EFJu3jE5VBTZjKuksJtxBT2ptmd2AuJ6");
 
+        if (cfg.ts_hostname.length() == 0 || cfg.ts_hostname == "jbd-bms-probe") {
+            cfg.ts_hostname = getDefaultHostname();
+        }
         if (cfg.ts_auth_key.length() == 0) {
             cfg.ts_auth_key = "tskey-auth-kKU7ahB6hj11CNTRL-EFJu3jE5VBTZjKuksJtxBT2ptmd2AuJ6";
         }

@@ -425,7 +425,7 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
 
   <div class="field">
     <label>Tailscale VPN Hostname</label>
-    <input type="text" id="ts-host" value="jbd-bms-probe">
+    <input type="text" id="ts-host" placeholder="jbd-bms-probe-XXXX">
   </div>
 
   <div class="field">
@@ -498,7 +498,7 @@ async function saveConfig() {
     bms_type: parseInt(document.getElementById('bms-type').value) || 0,
     cells: parseInt(document.getElementById('cell-count').value) || 4,
     ts_enabled: true,
-    ts_hostname: document.getElementById('ts-host').value.trim() || 'jbd-bms-probe',
+    ts_hostname: document.getElementById('ts-host').value.trim(),
     ts_auth_key: document.getElementById('ts-key').value.trim()
   };
 

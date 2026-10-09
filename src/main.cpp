@@ -68,7 +68,7 @@ void startTailscaleClient() {
 
     microlink_config_t config = {
         .auth_key = currentConfig.ts_auth_key.c_str(),
-        .device_name = currentConfig.ts_hostname.length() > 0 ? currentConfig.ts_hostname.c_str() : "jbd-bms-probe",
+        .device_name = currentConfig.ts_hostname.c_str(),
         .enable_derp = true,
         .enable_stun = true,
         .enable_disco = true,
@@ -370,7 +370,11 @@ void setupWebServerRoutes() {
         cfg.cell_count = doc["cells"] | 4;
 
         cfg.ts_enabled = doc["ts_enabled"] | true;
-        cfg.ts_hostname = doc["ts_hostname"] | "jbd-bms-probe";
+        if (doc["ts_hostname"].is<String>() && doc["ts_hostname"].as<String>().length() > 0) {
+            cfg.ts_hostname = doc["ts_hostname"].as<String>();
+        } else {
+            cfg.ts_hostname = ConfigManager::getDefaultHostname();
+        }
         if (doc["ts_auth_key"].is<String>() && doc["ts_auth_key"].as<String>().length() > 0) {
             cfg.ts_auth_key = doc["ts_auth_key"].as<String>();
         } else {
