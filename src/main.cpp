@@ -469,6 +469,10 @@ void setupWebServerRoutes() {
     });
 
     // Web OTA update
+    server.on("/update", HTTP_GET, []() {
+        server.sendHeader("Location", "/setup#ota", true);
+        server.send(302, "text/plain", "");
+    });
     server.on("/update", HTTP_POST, []() {
         server.sendHeader("Connection", "close");
         server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");

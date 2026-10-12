@@ -687,6 +687,16 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
   <div style="margin-top: 10px; text-align: center;">
     <a href="/" style="color: var(--accent); font-size: 0.85rem; text-decoration: none;" data-i18n="link_back">← Повернутися до Дашборду</a>
   </div>
+
+  <div id="ota" style="margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border);">
+    <h3 style="font-size: 1rem; margin-bottom: 6px;" data-i18n="ota_title">🚀 Оновлення прошивки (Web OTA)</h3>
+    <p style="font-size: 0.8rem; color: var(--muted); margin-bottom: 12px;" data-i18n="ota_desc">Оберіть файл прошивки (.bin) для оновлення по Wi-Fi:</p>
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <input type="file" id="ota-file" accept=".bin" style="font-size: 0.85rem; color: var(--muted); background: rgba(15,23,42,0.6); padding: 8px; border-radius: 8px; border: 1px solid var(--border);">
+      <button class="btn btn-sec" type="button" onclick="uploadOta()" id="btn-ota" style="background: rgba(56,189,248,0.15); border-color: var(--accent); color: var(--accent); font-weight: 600;" data-i18n="btn_ota">⬆️ Завантажити та прошити (OTA)</button>
+    </div>
+    <div id="ota-msg" style="margin-top: 8px; font-size: 0.85rem; font-weight: 600; text-align: center; display: none;"></div>
+  </div>
 </div>
 
 <script>
@@ -707,6 +717,9 @@ const SETUP_I18N = {
     lbl_ts_key: "Tailscale Auth Key",
     btn_save: "💾 Зберегти та перезавантажити",
     link_back: "← Повернутися до Дашборду",
+    ota_title: "🚀 Оновлення прошивки (Web OTA)",
+    ota_desc: "Оберіть файл прошивки (.bin) для оновлення по Wi-Fi:",
+    btn_ota: "⬆️ Завантажити та прошити (OTA)",
     scanning: "Сканування...",
     select_net: "-- Оберіть мережу --",
     no_wifi: "Мереж не знайдено",
@@ -729,6 +742,9 @@ const SETUP_I18N = {
     lbl_ts_key: "Tailscale Auth Key",
     btn_save: "💾 Save & Restart",
     link_back: "← Return to Dashboard",
+    ota_title: "🚀 Firmware Update (Web OTA)",
+    ota_desc: "Select compiled .bin firmware file for wireless OTA update:",
+    btn_ota: "⬆️ Flash Firmware (OTA)",
     scanning: "Scanning...",
     select_net: "-- Select a network --",
     no_wifi: "No Wi-Fi networks found",
@@ -847,6 +863,48 @@ async function saveConfig() {
     btn.innerText = tDict.btn_save;
     btn.disabled = false;
   }
+async function uploadOta() {
+  const fileInput = document.getElementById('ota-file');
+  if (!fileInput.files || fileInput.files.length === 0) {
+    alert(currentSetupLang === 'en' ? 'Please select a firmware .bin file first!' : 'Будь ласка, оберіть файл прошивки .bin!');
+    return;
+  }
+  const file = fileInput.files[0];
+  const msgEl = document.getElementById('ota-msg');
+  const btn = document.getElementById('btn-ota');
+  msgEl.style.display = 'block';
+  msgEl.style.color = 'var(--accent)';
+  msgEl.innerText = (currentSetupLang === 'en' ? '⏳ Uploading firmware (~15s)...' : '⏳ Завантаження прошивки (~15 сек)...');
+  btn.disabled = true;
+
+  const formData = new FormData();
+  formData.append('update', file);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update', true);
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round((e.loaded / e.total) * 100);
+      msgEl.innerText = (currentSetupLang === 'en' ? `⏳ Uploading: ${pct}%...` : `⏳ Завантаження: ${pct}%...`);
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200 && xhr.responseText.indexOf('FAIL') < 0) {
+      msgEl.style.color = '#22c55e';
+      msgEl.innerText = (currentSetupLang === 'en' ? '✅ OTA Success! Device is restarting...' : '✅ Прошивку оновлено! Пристрій перезавантажується...');
+      setTimeout(() => { location.href = '/'; }, 4000);
+    } else {
+      msgEl.style.color = '#ef4444';
+      msgEl.innerText = (currentSetupLang === 'en' ? '❌ OTA Update Failed: ' + xhr.responseText : '❌ Помилка OTA: ' + xhr.responseText);
+      btn.disabled = false;
+    }
+  };
+  xhr.onerror = () => {
+    msgEl.style.color = '#ef4444';
+    msgEl.innerText = '❌ Network Error during OTA';
+    btn.disabled = false;
+  };
+  xhr.send(formData);
 }
 
 setSetupLang(currentSetupLang);
