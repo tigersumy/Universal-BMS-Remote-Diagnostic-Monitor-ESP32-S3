@@ -632,14 +632,15 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
 
   <div class="field">
     <label data-i18n="lbl_wifi_ssid">Wi-Fi Мережа (SSID)</label>
-    <input type="text" id="wifi-ssid" placeholder="Home Wi-Fi Network">
+    <input type="text" id="wifi-ssid" placeholder="Home Wi-Fi Network" oninput="onSsidInputChanged()">
     <div class="btn-row"><button class="btn btn-sec" id="btn-scan-wifi" onclick="scanWifi()" data-i18n="btn_scan_wifi">🔄 Сканувати Wi-Fi</button></div>
-    <select id="wifi-select" style="display:none; margin-top:6px;" onchange="document.getElementById('wifi-ssid').value=this.value"></select>
+    <select id="wifi-select" style="display:none; margin-top:6px;" onchange="onWifiSelectChanged(this.value)"></select>
   </div>
 
   <div class="field">
     <label data-i18n="lbl_wifi_pass">Пароль Wi-Fi</label>
-    <input type="password" id="wifi-pass" placeholder="Wi-Fi Password">
+    <input type="password" id="wifi-pass" placeholder="Wi-Fi Password" autocomplete="new-password">
+    <small id="wifi-pass-hint" style="color: #38bdf8; font-size: 0.75rem; margin-top: 4px; display: none;" data-i18n="wifi_pass_hint">ℹ️ Пароль збережено. Залиште порожнім, щоб не змінювати.</small>
   </div>
 
   <div class="field">
@@ -729,7 +730,9 @@ const SETUP_I18N = {
     saving: "Збереження...",
     saved_msg: "Налаштування збережено! ESP32-S3 перезавантажується...",
     ts_key_saved_ph: "•••••••••••••••• (Збережено в пам'яті)",
-    ts_key_hint: "ℹ️ Ключ збережено в пам'яті. Залиште порожнім, щоб не змінювати."
+    ts_key_hint: "ℹ️ Ключ збережено в пам'яті. Залиште порожнім, щоб не змінювати.",
+    wifi_pass_saved_ph: "•••••••• (Збережено в пам'яті)",
+    wifi_pass_hint: "ℹ️ Пароль збережено. Залиште порожнім, щоб не змінювати."
   },
   en: {
     setup_title: "⚙️ Adapter Configuration",
@@ -756,11 +759,43 @@ const SETUP_I18N = {
     saving: "Saving...",
     saved_msg: "Settings saved! ESP32-S3 is restarting...",
     ts_key_saved_ph: "•••••••••••••••• (Saved in memory)",
-    ts_key_hint: "ℹ️ Key is saved in memory. Leave empty to keep existing key."
+    ts_key_hint: "ℹ️ Key is saved in memory. Leave empty to keep existing key.",
+    wifi_pass_saved_ph: "•••••••• (Saved in memory)",
+    wifi_pass_hint: "ℹ️ Password is saved. Leave empty to keep existing password."
   }
 };
 
 let hasTsKeySaved = false;
+let savedWifiSsid = '';
+let hasWifiPassSaved = false;
+
+function onWifiSelectChanged(val) {
+  if (!val) return;
+  document.getElementById('wifi-ssid').value = val;
+  onSsidInputChanged();
+}
+
+function onSsidInputChanged() {
+  const curSsid = document.getElementById('wifi-ssid').value.trim();
+  const passInput = document.getElementById('wifi-pass');
+  const passHint = document.getElementById('wifi-pass-hint');
+  const tDict = SETUP_I18N[currentSetupLang] || SETUP_I18N.ua;
+
+  if (hasWifiPassSaved && curSsid && curSsid === savedWifiSsid) {
+    if (!passInput.value) {
+      passInput.placeholder = tDict.wifi_pass_saved_ph;
+    }
+    if (passHint) {
+      passHint.innerText = tDict.wifi_pass_hint;
+      passHint.style.display = 'block';
+    }
+  } else {
+    passInput.placeholder = tDict.lbl_wifi_pass;
+    if (passHint) {
+      passHint.style.display = 'none';
+    }
+  }
+}
 
 function updateTsKeyUi() {
   if (!hasTsKeySaved) return;
@@ -789,13 +824,20 @@ function setSetupLang(lang) {
     }
   });
   updateTsKeyUi();
+  onSsidInputChanged();
 }
 
 async function loadConfig() {
   try {
     const res = await fetch('/api/config');
     const d = await res.json();
-    if (d.ssid) document.getElementById('wifi-ssid').value = d.ssid;
+    if (d.ssid) {
+      document.getElementById('wifi-ssid').value = d.ssid;
+      savedWifiSsid = d.ssid;
+    }
+    hasWifiPassSaved = !!d.has_wifi_pass;
+    onSsidInputChanged();
+
     if (d.mac) document.getElementById('bms-mac').value = d.mac;
     if (d.pin) document.getElementById('bms-pin').value = d.pin;
     if (d.bms_type !== undefined) document.getElementById('bms-type').value = d.bms_type;

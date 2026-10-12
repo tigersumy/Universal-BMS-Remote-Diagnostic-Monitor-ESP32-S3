@@ -245,6 +245,7 @@ void setupWebServerRoutes() {
     server.on("/api/config", HTTP_GET, []() {
         JsonDocument doc;
         doc["ssid"] = currentConfig.wifi_ssid;
+        doc["has_wifi_pass"] = (currentConfig.wifi_pass.length() > 0);
         doc["mac"]  = currentConfig.bms_mac;
         doc["name"] = currentConfig.bms_name;
         doc["bms_type"] = currentConfig.bms_type;
@@ -439,8 +440,34 @@ void setupWebServerRoutes() {
         deserializeJson(doc, server.arg("plain"));
 
         AppConfig cfg;
-        cfg.wifi_ssid  = doc["ssid"].as<String>();
-        cfg.wifi_pass  = doc["pass"].as<String>();
+        String inSsid = doc["ssid"] | "";
+        inSsid.trim();
+        String inPass = doc["pass"] | "";
+        inPass.trim();
+
+        String savedSsid = currentConfig.wifi_ssid;
+        String savedPass = currentConfig.wifi_pass;
+        if (savedSsid.length() == 0 || savedPass.length() == 0) {
+            Preferences p;
+            p.begin("bms_probe", true);
+            if (savedSsid.length() == 0) savedSsid = p.getString("ssid", "");
+            if (savedPass.length() == 0) savedPass = p.getString("pass", "");
+            p.end();
+        }
+
+        if (inSsid.length() > 0) {
+            cfg.wifi_ssid = inSsid;
+            if (inPass.length() > 0) {
+                cfg.wifi_pass = inPass;
+            } else if (inSsid == savedSsid) {
+                cfg.wifi_pass = savedPass;
+            } else {
+                cfg.wifi_pass = "";
+            }
+        } else {
+            cfg.wifi_ssid = savedSsid;
+            cfg.wifi_pass = (inPass.length() > 0) ? inPass : savedPass;
+        }
         cfg.bms_mac    = doc["mac"].as<String>();
         cfg.bms_name   = doc["name"] | "BMS Device";
         cfg.bms_type   = doc["bms_type"] | BMS_TYPE_AUTO;
