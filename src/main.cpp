@@ -455,8 +455,17 @@ void setupWebServerRoutes() {
         }
         if (doc["ts_auth_key"].is<String>() && doc["ts_auth_key"].as<String>().length() > 0) {
             cfg.ts_auth_key = doc["ts_auth_key"].as<String>();
+            currentConfig.ts_auth_key = cfg.ts_auth_key;
         } else {
-            cfg.ts_auth_key = currentConfig.ts_auth_key;
+            if (currentConfig.ts_auth_key.length() > 0) {
+                cfg.ts_auth_key = currentConfig.ts_auth_key;
+            } else {
+                Preferences prefs;
+                prefs.begin("bms_probe", true);
+                cfg.ts_auth_key = prefs.getString("ts_key", "");
+                prefs.end();
+                currentConfig.ts_auth_key = cfg.ts_auth_key;
+            }
         }
 
         ConfigManager::save(cfg);
@@ -543,8 +552,8 @@ void checkBootButton() {
         if (bootPressStart == 0) {
             bootPressStart = millis();
         } else if (millis() - bootPressStart > 4000) {
-            DebugLogger::warn("BOOT", "Held > 4s! Factory resetting configuration...");
-            ConfigManager::clear();
+            DebugLogger::warn("BOOT", "Held > 4s! Resetting network & BMS configuration (Tailscale key preserved)...");
+            ConfigManager::clear(true);
             delay(300);
             ESP.restart();
         }

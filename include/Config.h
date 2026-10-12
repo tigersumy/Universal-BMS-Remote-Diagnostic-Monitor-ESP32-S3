@@ -74,15 +74,24 @@ public:
         prefs.putUChar("cells", cfg.cell_count);
         prefs.putBool("ts_en", cfg.ts_enabled);
         prefs.putString("ts_host", cfg.ts_hostname);
-        prefs.putString("ts_key", cfg.ts_auth_key);
+        if (cfg.ts_auth_key.length() > 0) {
+            prefs.putString("ts_key", cfg.ts_auth_key);
+        }
 
         prefs.end();
     }
 
-    static void clear() {
+    static void clear(bool keepTsKey = true) {
         Preferences prefs;
         prefs.begin("bms_probe", false);
+        String savedTsKey = "";
+        if (keepTsKey) {
+            savedTsKey = prefs.getString("ts_key", "");
+        }
         prefs.clear();
+        if (keepTsKey && savedTsKey.length() > 0) {
+            prefs.putString("ts_key", savedTsKey);
+        }
         prefs.end();
     }
 };

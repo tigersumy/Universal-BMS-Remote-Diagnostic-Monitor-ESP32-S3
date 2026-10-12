@@ -681,6 +681,7 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
   <div class="field">
     <label data-i18n="lbl_ts_key">Tailscale Auth Key</label>
     <input type="password" id="ts-key" placeholder="tskey-auth-..." autocomplete="off">
+    <small id="ts-key-hint" style="color: #38bdf8; font-size: 0.75rem; margin-top: 4px; display: none;" data-i18n="ts_key_hint">ℹ️ Ключ збережено в пам'яті. Залиште порожнім, щоб не змінювати.</small>
   </div>
 
   <button class="btn btn-save" onclick="saveConfig()" data-i18n="btn_save">💾 Зберегти та перезавантажити</button>
@@ -726,7 +727,9 @@ const SETUP_I18N = {
     select_ble: "-- Оберіть знайдений BMS --",
     no_ble: "BMS пристроїв не знайдено",
     saving: "Збереження...",
-    saved_msg: "Налаштування збережено! ESP32-S3 перезавантажується..."
+    saved_msg: "Налаштування збережено! ESP32-S3 перезавантажується...",
+    ts_key_saved_ph: "•••••••••••••••• (Збережено в пам'яті)",
+    ts_key_hint: "ℹ️ Ключ збережено в пам'яті. Залиште порожнім, щоб не змінювати."
   },
   en: {
     setup_title: "⚙️ Adapter Configuration",
@@ -751,9 +754,27 @@ const SETUP_I18N = {
     select_ble: "-- Select discovered BMS --",
     no_ble: "No BMS devices found in range",
     saving: "Saving...",
-    saved_msg: "Settings saved! ESP32-S3 is restarting..."
+    saved_msg: "Settings saved! ESP32-S3 is restarting...",
+    ts_key_saved_ph: "•••••••••••••••• (Saved in memory)",
+    ts_key_hint: "ℹ️ Key is saved in memory. Leave empty to keep existing key."
   }
 };
+
+let hasTsKeySaved = false;
+
+function updateTsKeyUi() {
+  if (!hasTsKeySaved) return;
+  const tDict = SETUP_I18N[currentSetupLang] || SETUP_I18N.ua;
+  const keyInput = document.getElementById('ts-key');
+  if (keyInput && !keyInput.value) {
+    keyInput.placeholder = tDict.ts_key_saved_ph;
+  }
+  const hint = document.getElementById('ts-key-hint');
+  if (hint) {
+    hint.innerText = tDict.ts_key_hint;
+    hint.style.display = 'block';
+  }
+}
 
 function setSetupLang(lang) {
   currentSetupLang = lang;
@@ -767,6 +788,7 @@ function setSetupLang(lang) {
       el.innerText = SETUP_I18N[lang][key];
     }
   });
+  updateTsKeyUi();
 }
 
 async function loadConfig() {
@@ -779,6 +801,10 @@ async function loadConfig() {
     if (d.bms_type !== undefined) document.getElementById('bms-type').value = d.bms_type;
     if (d.cells) document.getElementById('cell-count').value = d.cells;
     if (d.ts_hostname) document.getElementById('ts-host').value = d.ts_hostname;
+    if (d.has_ts_key) {
+      hasTsKeySaved = true;
+      updateTsKeyUi();
+    }
   } catch(e) {}
 }
 
