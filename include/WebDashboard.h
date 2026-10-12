@@ -633,7 +633,7 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
   <div class="field">
     <label data-i18n="lbl_wifi_ssid">Wi-Fi Мережа (SSID)</label>
     <input type="text" id="wifi-ssid" placeholder="Home Wi-Fi Network">
-    <div class="btn-row"><button class="btn btn-sec" onclick="scanWifi()" data-i18n="btn_scan_wifi">🔄 Сканувати Wi-Fi</button></div>
+    <div class="btn-row"><button class="btn btn-sec" id="btn-scan-wifi" onclick="scanWifi()" data-i18n="btn_scan_wifi">🔄 Сканувати Wi-Fi</button></div>
     <select id="wifi-select" style="display:none; margin-top:6px;" onchange="document.getElementById('wifi-ssid').value=this.value"></select>
   </div>
 
@@ -645,7 +645,7 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
   <div class="field">
     <label data-i18n="lbl_bms_mac">Bluetooth MAC-адреса BMS</label>
     <input type="text" id="bms-mac" placeholder="AA:BB:CC:DD:EE:FF">
-    <div class="btn-row"><button class="btn btn-sec" onclick="scanBle()" data-i18n="btn_scan_ble">🔍 Знайти BMS в ефірі</button></div>
+    <div class="btn-row"><button class="btn btn-sec" id="btn-scan-ble" onclick="scanBle()" data-i18n="btn_scan_ble">🔍 Знайти BMS в ефірі</button></div>
     <select id="ble-select" style="display:none; margin-top:6px;" onchange="applyBleChoice(this.value)"></select>
   </div>
 
@@ -675,7 +675,7 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
 
   <div class="field">
     <label data-i18n="lbl_ts_host">Tailscale VPN Hostname</label>
-    <input type="text" id="ts-host" value="jbd-bms-probe" placeholder="jbd-bms-probe">
+    <input type="text" id="ts-host" value="" placeholder="jbd-bms-probe-xxxx (автогенерація)">
   </div>
 
   <div class="field">
@@ -785,40 +785,58 @@ async function loadConfig() {
 async function scanWifi() {
   const tDict = SETUP_I18N[currentSetupLang] || SETUP_I18N.ua;
   const sel = document.getElementById('wifi-select');
+  const btn = document.getElementById('btn-scan-wifi');
+  if (btn) btn.disabled = true;
   sel.style.display = 'block';
   sel.innerHTML = `<option>${tDict.scanning}</option>`;
   try {
     const res = await fetch('/api/scan-wifi');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const list = await res.json();
-    sel.innerHTML = `<option value="">${tDict.select_net}</option>`;
-    list.forEach(w => {
-      const opt = document.createElement('option');
-      opt.value = w.ssid;
-      opt.innerText = `${w.ssid} (${w.rssi} dBm)`;
-      sel.appendChild(opt);
-    });
+    if (!Array.isArray(list) || list.length === 0) {
+      sel.innerHTML = `<option value="">${tDict.no_wifi}</option>`;
+    } else {
+      sel.innerHTML = `<option value="">${tDict.select_net}</option>`;
+      list.forEach(w => {
+        const opt = document.createElement('option');
+        opt.value = w.ssid;
+        opt.innerText = `${w.ssid} (${w.rssi} dBm)`;
+        sel.appendChild(opt);
+      });
+    }
   } catch(e) {
-    sel.innerHTML = `<option>${tDict.no_wifi}</option>`;
+    sel.innerHTML = `<option value="">${tDict.no_wifi}</option>`;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
 async function scanBle() {
   const tDict = SETUP_I18N[currentSetupLang] || SETUP_I18N.ua;
   const sel = document.getElementById('ble-select');
+  const btn = document.getElementById('btn-scan-ble');
+  if (btn) btn.disabled = true;
   sel.style.display = 'block';
   sel.innerHTML = `<option>${tDict.scanning}</option>`;
   try {
     const res = await fetch('/api/scan-ble');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const list = await res.json();
-    sel.innerHTML = `<option value="">${tDict.select_ble}</option>`;
-    list.forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = JSON.stringify(d);
-      opt.innerText = `${d.name} [${d.mac}] (${d.type}) ${d.rssi}dBm`;
-      sel.appendChild(opt);
-    });
+    if (!Array.isArray(list) || list.length === 0) {
+      sel.innerHTML = `<option value="">${tDict.no_ble}</option>`;
+    } else {
+      sel.innerHTML = `<option value="">${tDict.select_ble}</option>`;
+      list.forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = JSON.stringify(d);
+        opt.innerText = `${d.name || 'Unknown'} [${d.mac}] (${d.type}) ${d.rssi}dBm`;
+        sel.appendChild(opt);
+      });
+    }
   } catch(e) {
-    sel.innerHTML = `<option>${tDict.no_ble}</option>`;
+    sel.innerHTML = `<option value="">${tDict.no_ble}</option>`;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -841,7 +859,7 @@ async function saveConfig() {
     bms_type: parseInt(document.getElementById('bms-type').value) || 0,
     pin: document.getElementById('bms-pin').value.trim(),
     cells: parseInt(document.getElementById('cell-count').value) || 4,
-    ts_hostname: document.getElementById('ts-host').value.trim() || "jbd-bms-probe",
+    ts_hostname: document.getElementById('ts-host').value.trim(),
     ts_auth_key: document.getElementById('ts-key').value.trim(),
     ts_enabled: true
   };
@@ -863,6 +881,7 @@ async function saveConfig() {
     btn.innerText = tDict.btn_save;
     btn.disabled = false;
   }
+}
 async function uploadOta() {
   const fileInput = document.getElementById('ota-file');
   if (!fileInput.files || fileInput.files.length === 0) {

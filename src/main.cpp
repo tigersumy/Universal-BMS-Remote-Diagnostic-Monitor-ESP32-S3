@@ -380,13 +380,27 @@ void setupWebServerRoutes() {
 
     // API: Wi-Fi Scan
     server.on("/api/scan-wifi", HTTP_GET, []() {
-        int n = WiFi.scanNetworks(false, false);
+        if (WiFi.getMode() != WIFI_AP_STA && WiFi.getMode() != WIFI_STA) {
+            WiFi.mode(WIFI_AP_STA);
+            delay(100);
+        }
+        int n = WiFi.scanNetworks(false, false, false, 150);
+        if (n < 0) {
+            WiFi.scanDelete();
+            delay(100);
+            n = WiFi.scanNetworks(false, false, false, 200);
+        }
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
-        for (int i = 0; i < n; i++) {
-            JsonObject item = arr.add<JsonObject>();
-            item["ssid"] = WiFi.SSID(i);
-            item["rssi"] = WiFi.RSSI(i);
+        if (n > 0) {
+            for (int i = 0; i < n; i++) {
+                String ssid = WiFi.SSID(i);
+                if (ssid.length() > 0) {
+                    JsonObject item = arr.add<JsonObject>();
+                    item["ssid"] = ssid;
+                    item["rssi"] = WiFi.RSSI(i);
+                }
+            }
         }
         WiFi.scanDelete();
         String out;
@@ -512,7 +526,7 @@ void startApMode() {
     isApMode = true;
     WiFi.persistent(false);
     WiFi.disconnect(true);
-    WiFi.mode(WIFI_AP);
+    WiFi.mode(WIFI_AP_STA);
     IPAddress apIP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
