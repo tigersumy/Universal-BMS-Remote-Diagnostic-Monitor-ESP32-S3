@@ -59,7 +59,9 @@ class BmsScanCallbacks : public NimBLEScanCallbacks {
         int rssi = advertisedDevice->getRSSI();
         String type = "Unknown";
 
-        if (name.startsWith("DL-") || name.startsWith("DL_") || name.startsWith("Daly") || name.startsWith("DALY") || name.startsWith("DL")) {
+        if (name.startsWith("DL-") || name.startsWith("DL_") || name.startsWith("Daly") || name.startsWith("DALY") || name.startsWith("DL") || name.startsWith("BMS-") ||
+            advertisedDevice->isAdvertisingService(NimBLEUUID("02f00000-0000-0000-0000-00000000fe00")) ||
+            advertisedDevice->isAdvertisingService(NimBLEUUID("fe00")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FE00"))) {
             type = "Daly-BMS";
         } else if (name.startsWith("JK") || advertisedDevice->isAdvertisingService(NimBLEUUID("ffe0")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FFE0"))) {
             if (name.indexOf("Daly") >= 0 || name.indexOf("DALY") >= 0 || name.startsWith("DL")) {
@@ -69,11 +71,16 @@ class BmsScanCallbacks : public NimBLEScanCallbacks {
             }
         } else if (name.startsWith("JBD") || name.startsWith("Xiaoxiang") || name.startsWith("SP") || name.startsWith("BS-") || name.startsWith("Smart") ||
                    advertisedDevice->isAdvertisingService(NimBLEUUID("ff00")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FF00")) ||
-                   advertisedDevice->isAdvertisingService(NimBLEUUID("fff0")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FFF0")) ||
                    advertisedDevice->isAdvertisingService(NimBLEUUID("fee7")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FEE7")) ||
-                   advertisedDevice->isAdvertisingService(NimBLEUUID("0000FF00-0000-1000-8000-00805F9B34FB")) ||
-                   advertisedDevice->isAdvertisingService(NimBLEUUID("0000FFF0-0000-1000-8000-00805F9B34FB"))) {
+                   advertisedDevice->isAdvertisingService(NimBLEUUID("0000FF00-0000-1000-8000-00805F9B34FB"))) {
             type = "JBD-BMS";
+        } else if (advertisedDevice->isAdvertisingService(NimBLEUUID("fff0")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FFF0")) ||
+                   advertisedDevice->isAdvertisingService(NimBLEUUID("0000FFF0-0000-1000-8000-00805F9B34FB"))) {
+            if (name.startsWith("DL") || name.indexOf("Daly") >= 0 || name.indexOf("DALY") >= 0 || name.startsWith("BMS-")) {
+                type = "Daly-BMS";
+            } else {
+                type = "JBD-BMS";
+            }
         }
 
         for (auto& dev : s_pInstance->m_discoveredDevices) {
@@ -274,6 +281,8 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
     std::vector<NimBLERemoteCharacteristic*> writeChars;
     NimBLERemoteService* pJkService = nullptr;
 
+    bool hasDalyFe00 = false;
+
     for (auto* s : services) {
         String sUuid = s->getUUID().toString().c_str();
         sUuid.toLowerCase();
@@ -281,6 +290,9 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
 
         if (sUuid.indexOf("ffe0") >= 0) {
             pJkService = s;
+        }
+        if (sUuid.indexOf("fe00") >= 0 || sUuid.indexOf("02f00000") >= 0) {
+            hasDalyFe00 = true;
         }
 
         for (auto* c : s->getCharacteristics(true)) {
@@ -300,7 +312,79 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
         }
     }
 
-    // 1. Process JBD (if not JK service or if forcedType is JBD)
+    // 1. Process Daly BMS (Check first to avoid greedy JBD capture of FFF0/FFF1/FFF2)
+    bool isDalyCandidate = (forcedType == BMS_TYPE_DALY) || 
+                           hasDalyFe00 ||
+                           ((forcedType == BMS_TYPE_AUTO) && (name.startsWith("DL") || name.startsWith("BMS-") || name.indexOf("Daly") >= 0 || name.indexOf("DALY") >= 0));
+
+    if (isDalyCandidate) {
+        DebugLogger::info(TAG, "Attempting Daly BMS protocol negotiation...");
+        m_pDalyNotifyChar = nullptr;
+        m_pDalyWriteChar = nullptr;
+
+        // Search for Daly characteristics: FFF1/FFF2 (standard) or FFE1/FFE2 or 6E400003/6E400002 (NUS)
+        for (auto* s : services) {
+            for (auto* c : s->getCharacteristics(true)) {
+                String uuid = c->getUUID().toString().c_str();
+                uuid.toLowerCase();
+                if (uuid.indexOf("fff1") >= 0 || uuid.indexOf("ffe1") >= 0 || uuid.indexOf("6e400003") >= 0) {
+                    m_pDalyNotifyChar = c;
+                }
+                if (uuid.indexOf("fff2") >= 0 || uuid.indexOf("ffe2") >= 0 || uuid.indexOf("6e400002") >= 0) {
+                    m_pDalyWriteChar = c;
+                }
+            }
+        }
+
+        // Generic fallback if not matched by specific UUID string
+        if (!m_pDalyNotifyChar || !m_pDalyWriteChar) {
+            for (auto* s : services) {
+                String sUuid = s->getUUID().toString().c_str();
+                sUuid.toLowerCase();
+                if (sUuid.indexOf("fe00") >= 0 && services.size() > 1) continue; // skip proprietary config service
+
+                for (auto* c : s->getCharacteristics(true)) {
+                    if (!m_pDalyNotifyChar && (c->canNotify() || c->canIndicate())) {
+                        m_pDalyNotifyChar = c;
+                    }
+                    if (!m_pDalyWriteChar && (c->canWrite() || c->canWriteNoResponse())) {
+                        m_pDalyWriteChar = c;
+                    }
+                }
+            }
+        }
+
+        if (!m_pDalyWriteChar && m_pDalyNotifyChar && (m_pDalyNotifyChar->canWrite() || m_pDalyNotifyChar->canWriteNoResponse())) {
+            m_pDalyWriteChar = m_pDalyNotifyChar;
+        }
+
+        if (m_pDalyNotifyChar && m_pDalyWriteChar) {
+            m_pDalyNotifyChar->subscribe(true, [this](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+                this->handleDalyPacket(pData, length);
+            });
+            m_dalyWriteWithResponse = m_pDalyWriteChar->canWrite() && !m_pDalyWriteChar->canWriteNoResponse();
+            DebugLogger::info(TAG, "Selected Daly BMS: Notify H:" + String(m_pDalyNotifyChar->getHandle()) + 
+                                  ", Write H:" + String(m_pDalyWriteChar->getHandle()) + 
+                                  " (WithResponse: " + String(m_dalyWriteWithResponse) + ")");
+
+            m_isConnected = true;
+            m_telemetry.connected = true;
+            m_telemetry.bms_type = "Daly-BMS";
+            m_telemetry.device_name = name.length() > 0 ? name : "Daly-BMS";
+            m_telemetry.mac_address = address.toString().c_str();
+            m_telemetry.last_update = millis();
+
+            // Initial query
+            sendDalyCommand(0x90);
+            delay(100);
+            sendDalyCommand(0x94);
+            return true;
+        } else {
+            DebugLogger::warn(TAG, "Daly candidate detected but characteristics not resolved, checking other protocols...");
+        }
+    }
+
+    // 2. Process JBD (if not JK service, not Daly, or if forcedType is JBD)
     if (!notifyChars.empty() && !writeChars.empty() && (forcedType == BMS_TYPE_AUTO || forcedType == BMS_TYPE_JBD) && (!pJkService || forcedType == BMS_TYPE_JBD)) {
         if (m_config.bms_pin.length() > 0) {
             DebugLogger::info(TAG, "Securing JBD connection with Passkey: " + m_config.bms_pin);
@@ -374,51 +458,6 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
         }
 
         return true;
-    }
-
-    // 2. Process Daly Service (0xFFE0) if Daly is explicitly selected or device name matches Daly
-    bool isDalyCandidate = (forcedType == BMS_TYPE_DALY) || 
-                           ((forcedType == BMS_TYPE_AUTO) && (name.startsWith("DL") || name.indexOf("Daly") >= 0 || name.indexOf("DALY") >= 0));
-
-    if (pJkService && isDalyCandidate) {
-        DebugLogger::info(TAG, "Selected Daly BMS Service (0xFFE0)");
-        m_pDalyNotifyChar = nullptr;
-        m_pDalyWriteChar = nullptr;
-
-        for (auto* c : pJkService->getCharacteristics(true)) {
-            String uuid = c->getUUID().toString().c_str();
-            uuid.toLowerCase();
-            if (uuid.indexOf("ffe2") >= 0 || (c->canWriteNoResponse() && !c->canNotify())) {
-                m_pDalyWriteChar = c;
-            }
-            if (uuid.indexOf("ffe1") >= 0 || c->canNotify()) {
-                m_pDalyNotifyChar = c;
-                c->subscribe(true, [this](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
-                    this->handleDalyPacket(pData, length);
-                });
-                DebugLogger::info(TAG, "Subscribed to Daly Notify H:" + String(c->getHandle()));
-            }
-        }
-
-        if (!m_pDalyWriteChar && m_pDalyNotifyChar) {
-            m_pDalyWriteChar = m_pDalyNotifyChar;
-        }
-
-        if (m_pDalyNotifyChar) {
-            m_dalyWriteWithResponse = m_pDalyWriteChar->canWrite() && !m_pDalyWriteChar->canWriteNoResponse();
-            m_isConnected = true;
-            m_telemetry.connected = true;
-            m_telemetry.bms_type = "Daly-BMS";
-            m_telemetry.device_name = name.length() > 0 ? name : "Daly-BMS";
-            m_telemetry.mac_address = address.toString().c_str();
-            m_telemetry.last_update = millis();
-
-            // Initial query
-            sendDalyCommand(0x90);
-            delay(100);
-            sendDalyCommand(0x94);
-            return true;
-        }
     }
 
     // 3. Process JK Service (0xFFE0)
