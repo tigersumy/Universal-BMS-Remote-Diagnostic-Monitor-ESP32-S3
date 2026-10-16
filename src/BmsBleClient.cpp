@@ -59,8 +59,14 @@ class BmsScanCallbacks : public NimBLEScanCallbacks {
         int rssi = advertisedDevice->getRSSI();
         String type = "Unknown";
 
-        if (name.startsWith("JK") || advertisedDevice->isAdvertisingService(NimBLEUUID("ffe0")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FFE0"))) {
-            type = "JK-BMS";
+        if (name.startsWith("DL-") || name.startsWith("DL_") || name.startsWith("Daly") || name.startsWith("DALY") || name.startsWith("DL")) {
+            type = "Daly-BMS";
+        } else if (name.startsWith("JK") || advertisedDevice->isAdvertisingService(NimBLEUUID("ffe0")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FFE0"))) {
+            if (name.indexOf("Daly") >= 0 || name.indexOf("DALY") >= 0 || name.startsWith("DL")) {
+                type = "Daly-BMS";
+            } else {
+                type = "JK-BMS";
+            }
         } else if (name.startsWith("JBD") || name.startsWith("Xiaoxiang") || name.startsWith("SP") || name.startsWith("BS-") || name.startsWith("Smart") ||
                    advertisedDevice->isAdvertisingService(NimBLEUUID("ff00")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FF00")) ||
                    advertisedDevice->isAdvertisingService(NimBLEUUID("fff0")) || advertisedDevice->isAdvertisingService(NimBLEUUID("FFF0")) ||
@@ -214,19 +220,28 @@ void BmsBleClient::loop() {
     }
 
     // Polling logic
-    if (m_isConnected && (now - m_lastPollTime >= 1000)) {
-        m_lastPollTime = now;
-
-        if (m_telemetry.bms_type == "JBD-BMS") {
-            if (m_pollStep % 2 == 0) {
-                sendJbdCommand(0xA5, 0x03); // Basic Info
-            } else {
-                sendJbdCommand(0xA5, 0x04); // Cell Voltages
+    if (m_isConnected) {
+        if (m_telemetry.bms_type == "Daly-BMS") {
+            if (now - m_lastPollTime >= 200) {
+                m_lastPollTime = now;
+                static const uint8_t s_dalyCmds[] = { 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+                uint8_t cmd = s_dalyCmds[m_pollStep % (sizeof(s_dalyCmds)/sizeof(s_dalyCmds[0]))];
+                sendDalyCommand(cmd);
+                m_pollStep++;
             }
-            m_pollStep++;
-        } else if (m_telemetry.bms_type == "JK-BMS") {
-            if (m_telemetry.last_update == 0 || (now - m_telemetry.last_update > 4000)) {
-                sendJkPollRequest();
+        } else if (now - m_lastPollTime >= 1000) {
+            m_lastPollTime = now;
+            if (m_telemetry.bms_type == "JBD-BMS") {
+                if (m_pollStep % 2 == 0) {
+                    sendJbdCommand(0xA5, 0x03); // Basic Info
+                } else {
+                    sendJbdCommand(0xA5, 0x04); // Cell Voltages
+                }
+                m_pollStep++;
+            } else if (m_telemetry.bms_type == "JK-BMS") {
+                if (m_telemetry.last_update == 0 || (now - m_telemetry.last_update > 4000)) {
+                    sendJkPollRequest();
+                }
             }
         }
     }
@@ -361,7 +376,52 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
         return true;
     }
 
-    // 2. Process JK Service (0xFFE0)
+    // 2. Process Daly Service (0xFFE0) if Daly is explicitly selected or device name matches Daly
+    bool isDalyCandidate = (forcedType == BMS_TYPE_DALY) || 
+                           ((forcedType == BMS_TYPE_AUTO) && (name.startsWith("DL") || name.indexOf("Daly") >= 0 || name.indexOf("DALY") >= 0));
+
+    if (pJkService && isDalyCandidate) {
+        DebugLogger::info(TAG, "Selected Daly BMS Service (0xFFE0)");
+        m_pDalyNotifyChar = nullptr;
+        m_pDalyWriteChar = nullptr;
+
+        for (auto* c : pJkService->getCharacteristics(true)) {
+            String uuid = c->getUUID().toString().c_str();
+            uuid.toLowerCase();
+            if (uuid.indexOf("ffe2") >= 0 || (c->canWriteNoResponse() && !c->canNotify())) {
+                m_pDalyWriteChar = c;
+            }
+            if (uuid.indexOf("ffe1") >= 0 || c->canNotify()) {
+                m_pDalyNotifyChar = c;
+                c->subscribe(true, [this](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+                    this->handleDalyPacket(pData, length);
+                });
+                DebugLogger::info(TAG, "Subscribed to Daly Notify H:" + String(c->getHandle()));
+            }
+        }
+
+        if (!m_pDalyWriteChar && m_pDalyNotifyChar) {
+            m_pDalyWriteChar = m_pDalyNotifyChar;
+        }
+
+        if (m_pDalyNotifyChar) {
+            m_dalyWriteWithResponse = m_pDalyWriteChar->canWrite() && !m_pDalyWriteChar->canWriteNoResponse();
+            m_isConnected = true;
+            m_telemetry.connected = true;
+            m_telemetry.bms_type = "Daly-BMS";
+            m_telemetry.device_name = name.length() > 0 ? name : "Daly-BMS";
+            m_telemetry.mac_address = address.toString().c_str();
+            m_telemetry.last_update = millis();
+
+            // Initial query
+            sendDalyCommand(0x90);
+            delay(100);
+            sendDalyCommand(0x94);
+            return true;
+        }
+    }
+
+    // 3. Process JK Service (0xFFE0)
     if (pJkService && (forcedType == BMS_TYPE_AUTO || forcedType == BMS_TYPE_JK)) {
         DebugLogger::info(TAG, "Selected JK Service (0xFFE0)");
         m_pJkNotifyChar = nullptr;
@@ -407,7 +467,7 @@ bool BmsBleClient::connectToDevice(const NimBLEAddress& address, const String& n
         }
     }
 
-    DebugLogger::error(TAG, "No usable JBD (FF00/FFF0/FEE7) or JK (FFE0) characteristics discovered");
+    DebugLogger::error(TAG, "No usable JBD (FF00/FFF0/FEE7), JK (FFE0), or Daly (FFE0) characteristics discovered");
     disconnect();
     return false;
 }
@@ -422,6 +482,8 @@ void BmsBleClient::disconnect() {
     m_pJbdWriteChar  = nullptr;
     m_pJkNotifyChar  = nullptr;
     m_pJkWriteChar   = nullptr;
+    m_pDalyNotifyChar = nullptr;
+    m_pDalyWriteChar  = nullptr;
     m_rxBuffer.clear();
 }
 
@@ -923,6 +985,18 @@ bool BmsBleClient::setSwitch(const String& sw, bool state) {
             }
             return ok;
         }
+    } else if (m_telemetry.bms_type == "Daly-BMS") {
+        if (sw == "charging") {
+            uint8_t payload[8] = { (uint8_t)(state ? 0x01 : 0x00), 0, 0, 0, 0, 0, 0, 0 };
+            sendDalyCommand(0xDA, payload);
+            m_telemetry.switch_charging = state;
+            return true;
+        } else if (sw == "discharging") {
+            uint8_t payload[8] = { (uint8_t)(state ? 0x01 : 0x00), 0, 0, 0, 0, 0, 0, 0 };
+            sendDalyCommand(0xD9, payload);
+            m_telemetry.switch_discharging = state;
+            return true;
+        }
     }
     return false;
 }
@@ -1031,5 +1105,303 @@ bool BmsBleClient::writeJbdCapacityParams(float nominalAh, float cycleAh, uint8_
 
     // Re-query telemetry
     sendJbdCommand(0xA5, 0x03);
+    return true;
+}
+
+// ======================== Daly Implementation ========================
+
+uint8_t BmsBleClient::calcDalyChecksum(const uint8_t* buf, size_t len) {
+    uint8_t sum = 0;
+    for (size_t i = 0; i < len; ++i) {
+        sum += buf[i];
+    }
+    return sum;
+}
+
+void BmsBleClient::sendDalyCommand(uint8_t cmdId, const uint8_t* payload) {
+    if (!m_isConnected) return;
+    NimBLERemoteCharacteristic* writeChar = m_pDalyWriteChar ? m_pDalyWriteChar : m_pDalyNotifyChar;
+    if (!writeChar) return;
+
+    uint8_t frame[13];
+    frame[0] = 0xA5;
+    frame[1] = 0x40; // Host address
+    frame[2] = cmdId;
+    frame[3] = 0x08; // Length
+    if (payload) {
+        memcpy(&frame[4], payload, 8);
+    } else {
+        memset(&frame[4], 0, 8);
+    }
+    frame[12] = calcDalyChecksum(frame, 12);
+
+    DebugLogger::logTx(TAG, frame, 13, "Daly Cmd 0x" + String(cmdId, HEX));
+    writeChar->writeValue(frame, 13, m_dalyWriteWithResponse);
+}
+
+void BmsBleClient::handleDalyPacket(const uint8_t* data, size_t len) {
+    DebugLogger::logRx(TAG, data, len, "Daly Raw");
+    if (!data || len == 0) return;
+
+    m_rxBuffer.insert(m_rxBuffer.end(), data, data + len);
+
+    size_t i = 0;
+    while (i < m_rxBuffer.size()) {
+        if (m_rxBuffer[i] != 0xA5) {
+            i++;
+            continue;
+        }
+
+        if (m_rxBuffer.size() - i < 13) {
+            break;
+        }
+
+        uint8_t dataLen = m_rxBuffer[i + 3];
+        if (dataLen != 0x08) {
+            i++;
+            continue;
+        }
+
+        uint8_t expectedCrc = m_rxBuffer[i + 12];
+        uint8_t calcCrc = calcDalyChecksum(&m_rxBuffer[i], 12);
+
+        if (calcCrc == expectedCrc) {
+            uint8_t cmdId = m_rxBuffer[i + 2];
+            decodeDalyTelemetry(cmdId, &m_rxBuffer[i + 4]);
+            i += 13;
+        } else {
+            i++;
+        }
+    }
+
+    if (i > 0) {
+        m_rxBuffer.erase(m_rxBuffer.begin(), m_rxBuffer.begin() + i);
+    }
+    if (m_rxBuffer.size() > 256) {
+        m_rxBuffer.clear();
+    }
+}
+
+void BmsBleClient::decodeDalyTelemetry(uint8_t cmdId, const uint8_t* data) {
+    m_telemetry.connected = true;
+    m_telemetry.bms_type = "Daly-BMS";
+    m_telemetry.last_update = millis();
+
+    switch (cmdId) {
+        case 0x90: { // Total Voltage, Current, SoC
+            uint16_t vRaw = (uint16_t(data[0]) << 8) | data[1];
+            m_telemetry.total_voltage = (float)vRaw * 0.1f;
+
+            int32_t iRaw = (int32_t(data[4]) << 8) | data[5];
+            m_telemetry.current = (float)(iRaw - 30000) * 0.1f;
+            m_telemetry.power = m_telemetry.total_voltage * m_telemetry.current;
+            if (m_telemetry.current >= 0.0f) {
+                m_telemetry.charge_power = m_telemetry.power;
+                m_telemetry.discharge_power = 0.0f;
+            } else {
+                m_telemetry.discharge_power = -m_telemetry.power;
+                m_telemetry.charge_power = 0.0f;
+            }
+
+            uint16_t socRaw = (uint16_t(data[6]) << 8) | data[7];
+            m_telemetry.soc = (float)socRaw * 0.1f;
+            break;
+        }
+
+        case 0x91: { // Min/Max Cell V
+            uint16_t maxMv = (uint16_t(data[0]) << 8) | data[1];
+            m_telemetry.max_cell_idx = data[2];
+            uint16_t minMv = (uint16_t(data[3]) << 8) | data[4];
+            m_telemetry.min_cell_idx = data[5];
+
+            m_telemetry.max_cell_v = (float)maxMv * 0.001f;
+            m_telemetry.min_cell_v = (float)minMv * 0.001f;
+            m_telemetry.delta_cell_v = m_telemetry.max_cell_v - m_telemetry.min_cell_v;
+            break;
+        }
+
+        case 0x92: { // Temperature Extremes
+            int8_t maxT = (int8_t)data[0] - 40;
+            int8_t minT = (int8_t)data[2] - 40;
+            m_telemetry.temp_sensor1 = (float)maxT;
+            m_telemetry.temp_sensor2 = (float)minT;
+            break;
+        }
+
+        case 0x93: { // MOS Status & Residual Capacity
+            m_telemetry.switch_charging = (data[1] == 1);
+            m_telemetry.switch_discharging = (data[2] == 1);
+            uint32_t remMah = ((uint32_t)data[4] << 24) | ((uint32_t)data[5] << 16) | ((uint32_t)data[6] << 8) | data[7];
+            m_telemetry.capacity_remain = (float)remMah * 0.001f;
+            break;
+        }
+
+        case 0x94: { // Cells & Sensor Count, Cycle Count
+            uint8_t cells = data[0];
+            if (cells >= 1 && cells <= 32) {
+                m_telemetry.cell_count = cells;
+            }
+            m_telemetry.cycle_count = (uint16_t(data[5]) << 8) | data[6];
+            break;
+        }
+
+        case 0x95: { // Cell Voltages (3 cells per frame)
+            uint8_t frameNum = data[0];
+            if (frameNum >= 1 && frameNum <= 11) {
+                uint8_t baseIdx = (frameNum - 1) * 3;
+                uint16_t v1 = (uint16_t(data[1]) << 8) | data[2];
+                uint16_t v2 = (uint16_t(data[3]) << 8) | data[4];
+                uint16_t v3 = (uint16_t(data[5]) << 8) | data[6];
+
+                if (baseIdx < 32 && (baseIdx < m_telemetry.cell_count || m_telemetry.cell_count == 0)) {
+                    if (v1 > 0) m_telemetry.cell_voltages[baseIdx] = (float)v1 * 0.001f;
+                }
+                if (baseIdx + 1 < 32 && (baseIdx + 1 < m_telemetry.cell_count || m_telemetry.cell_count == 0)) {
+                    if (v2 > 0) m_telemetry.cell_voltages[baseIdx + 1] = (float)v2 * 0.001f;
+                }
+                if (baseIdx + 2 < 32 && (baseIdx + 2 < m_telemetry.cell_count || m_telemetry.cell_count == 0)) {
+                    if (v3 > 0) m_telemetry.cell_voltages[baseIdx + 2] = (float)v3 * 0.001f;
+                }
+
+                // Recalculate min/max/delta
+                float minV = 999.0f;
+                float maxV = 0.0f;
+                uint8_t minIdx = 1;
+                uint8_t maxIdx = 1;
+                for (uint8_t c = 0; c < m_telemetry.cell_count && c < 32; ++c) {
+                    float cv = m_telemetry.cell_voltages[c];
+                    if (cv > 0.5f) {
+                        if (cv < minV) { minV = cv; minIdx = c + 1; }
+                        if (cv > maxV) { maxV = cv; maxIdx = c + 1; }
+                    }
+                }
+                if (maxV > 0.0f) {
+                    m_telemetry.max_cell_v = maxV;
+                    m_telemetry.max_cell_idx = maxIdx;
+                    m_telemetry.min_cell_v = (minV < 900.0f) ? minV : 0.0f;
+                    m_telemetry.min_cell_idx = minIdx;
+                    m_telemetry.delta_cell_v = m_telemetry.max_cell_v - m_telemetry.min_cell_v;
+                }
+            }
+            break;
+        }
+
+        case 0x96: { // Temperature Sensors
+            uint8_t frameNum = data[0];
+            if (frameNum == 1) {
+                if (data[1] != 0) m_telemetry.temp_sensor1 = (int8_t)data[1] - 40;
+                if (data[2] != 0) m_telemetry.temp_sensor2 = (int8_t)data[2] - 40;
+                if (data[3] != 0) m_telemetry.temp_mos = (int8_t)data[3] - 40;
+            }
+            break;
+        }
+
+        case 0x97: { // Balancing status
+            uint32_t balMask = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
+            m_telemetry.balancing_active = (balMask != 0);
+            m_telemetry.switch_balancer = (balMask != 0);
+            m_telemetry.balancer_direction = m_telemetry.balancing_active ? "Активне" : "Очікування";
+            break;
+        }
+
+        case 0x98: { // Fault / Failure Status (8 bytes)
+            m_telemetry.raw_errors = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
+            bool hasError = false;
+            String errStr = "";
+
+            if (data[0] & 0x01) { errStr += "Cell OV L1; "; hasError = true; }
+            if (data[0] & 0x02) { errStr += "Cell OV L2; "; hasError = true; }
+            if (data[0] & 0x04) { errStr += "Cell UV L1; "; hasError = true; }
+            if (data[0] & 0x08) { errStr += "Cell UV L2; "; hasError = true; }
+            if (data[0] & 0x10) { errStr += "Pack OV L1; "; hasError = true; }
+            if (data[0] & 0x20) { errStr += "Pack OV L2; "; hasError = true; }
+            if (data[0] & 0x40) { errStr += "Pack UV L1; "; hasError = true; }
+            if (data[0] & 0x80) { errStr += "Pack UV L2; "; hasError = true; }
+
+            if (data[1] & 0x01) { errStr += "Chg OT L1; "; hasError = true; }
+            if (data[1] & 0x02) { errStr += "Chg OT L2; "; hasError = true; }
+            if (data[1] & 0x04) { errStr += "Chg UT L1; "; hasError = true; }
+            if (data[1] & 0x08) { errStr += "Chg UT L2; "; hasError = true; }
+            if (data[1] & 0x10) { errStr += "Dsg OT L1; "; hasError = true; }
+            if (data[1] & 0x20) { errStr += "Dsg OT L2; "; hasError = true; }
+            if (data[1] & 0x40) { errStr += "Dsg UT L1; "; hasError = true; }
+            if (data[1] & 0x80) { errStr += "Dsg UT L2; "; hasError = true; }
+
+            if (data[2] & 0x01) { errStr += "Chg OC L1; "; hasError = true; }
+            if (data[2] & 0x02) { errStr += "Chg OC L2; "; hasError = true; }
+            if (data[2] & 0x04) { errStr += "Dsg OC L1; "; hasError = true; }
+            if (data[2] & 0x08) { errStr += "Dsg OC L2; "; hasError = true; }
+            if (data[2] & 0x10) { errStr += "High SOC; "; hasError = true; }
+            if (data[2] & 0x20) { errStr += "Low SOC; "; hasError = true; }
+            if (data[2] & 0x40) { errStr += "Cell Diff L1; "; hasError = true; }
+            if (data[2] & 0x80) { errStr += "Cell Diff L2; "; hasError = true; }
+
+            if (data[3] & 0x01) { errStr += "MOS Over-temp; "; hasError = true; }
+            if (data[3] & 0x02) { errStr += "Temp Sensor Fault; "; hasError = true; }
+            if (data[3] & 0x04) { errStr += "Cell Sampling Fault; "; hasError = true; }
+            if (data[3] & 0x08) { errStr += "MOS Fault; "; hasError = true; }
+            if (data[3] & 0x10) { errStr += "Short Circuit; "; hasError = true; }
+
+            if (hasError) {
+                m_telemetry.errors_str = errStr;
+            } else {
+                m_telemetry.errors_str = "OK (Без помилок)";
+            }
+            break;
+        }
+
+        case 0x21:
+        case 0x51: { // Rated Capacity
+            uint32_t nomMah = ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
+            if (nomMah > 0) {
+                m_telemetry.capacity_nominal_setting = (float)nomMah * 0.001f;
+                m_telemetry.capacity_total = m_telemetry.capacity_nominal_setting;
+                m_telemetry.capacity_cycle_setting = m_telemetry.capacity_nominal_setting * 0.8f;
+                m_telemetry.cycle_capacity = m_telemetry.capacity_cycle_setting;
+                DebugLogger::info(TAG, "Daly Rated Capacity: " + String(m_telemetry.capacity_nominal_setting, 1) + " Ah");
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+bool BmsBleClient::writeDalyCapacityParams(float nominalAh, uint8_t cellCount) {
+    if (!m_isConnected || m_telemetry.bms_type != "Daly-BMS") {
+        DebugLogger::warn(TAG, "writeDalyCapacityParams failed: not connected to Daly BMS");
+        return false;
+    }
+
+    char logBuf[128];
+    sprintf(logBuf, "Writing Daly Params: Nom=%.1fAh, Cells=%dS", nominalAh, cellCount);
+    DebugLogger::info(TAG, logBuf);
+
+    if (nominalAh > 0.5f) {
+        uint32_t mah = (uint32_t)(nominalAh * 1000.0f);
+        uint8_t pNom[8] = { (uint8_t)(mah >> 24), (uint8_t)(mah >> 16), (uint8_t)(mah >> 8), (uint8_t)(mah & 0xFF), 0, 0, 0, 0 };
+        sendDalyCommand(0x21, pNom);
+        delay(80);
+        sendDalyCommand(0x51, pNom);
+        delay(80);
+        m_telemetry.capacity_nominal_setting = nominalAh;
+        m_telemetry.capacity_total = nominalAh;
+        m_telemetry.capacity_cycle_setting = nominalAh * 0.8f;
+        m_telemetry.cycle_capacity = m_telemetry.capacity_cycle_setting;
+    }
+
+    if (cellCount >= 3 && cellCount <= 32) {
+        uint8_t pCnt[8] = { cellCount, 0, 0, 0, 0, 0, 0, 0 };
+        sendDalyCommand(0x50, pCnt);
+        delay(80);
+        sendDalyCommand(0xD6, pCnt);
+        delay(80);
+        m_telemetry.cell_count = cellCount;
+    }
+
+    sendDalyCommand(0x90);
+    delay(50);
+    sendDalyCommand(0x94);
     return true;
 }

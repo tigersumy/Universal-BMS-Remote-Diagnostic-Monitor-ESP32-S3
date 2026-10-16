@@ -143,7 +143,7 @@ body { background: var(--bg); color: var(--text); padding: 12px; min-height: 100
     </div>
 
     <div class="section">
-      <h2 data-i18n="sec_eeprom">⚙️ Налаштування ємності JBD BMS (EEPROM)</h2>
+      <h2 data-i18n="sec_eeprom">⚙️ Налаштування ємності BMS (EEPROM / Flash)</h2>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 10px;">
         <div>
           <label style="font-size:0.75rem; color:var(--muted); font-weight:600; text-transform:uppercase;" data-i18n="lbl_nom_ah">Номінал (Ah)</label>
@@ -234,7 +234,7 @@ const I18N = {
     sec_mos: "🔌 Керування захистом",
     sw_chg: "Заряд (Charge MOS)",
     sw_dsg: "Розряд (Discharge MOS)",
-    sec_eeprom: "⚙️ Налаштування ємності JBD BMS (EEPROM)",
+    sec_eeprom: "⚙️ Налаштування ємності BMS (EEPROM / Flash)",
     lbl_nom_ah: "Номінал (Ah)",
     lbl_cyc_ah: "Циклічна (Ah)",
     lbl_cell_cnt: "Кількість S",
@@ -277,7 +277,7 @@ const I18N = {
     sec_mos: "🔌 MOSFET Protection Control",
     sw_chg: "Charge MOS",
     sw_dsg: "Discharge MOS",
-    sec_eeprom: "⚙️ JBD BMS Capacity Settings (EEPROM)",
+    sec_eeprom: "⚙️ BMS Capacity Settings (EEPROM / Flash)",
     lbl_nom_ah: "Nominal (Ah)",
     lbl_cyc_ah: "Cycle (Ah)",
     lbl_cell_cnt: "Cell Count (S)",
@@ -653,9 +653,10 @@ input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px soli
   <div class="field">
     <label data-i18n="lbl_bms_type">Тип BMS</label>
     <select id="bms-type">
-      <option value="0">Auto Detect (JBD / JK)</option>
+      <option value="0">Auto Detect (JBD / JK / Daly)</option>
       <option value="2">JBD-BMS (Xiaoxiang / Smart BMS)</option>
       <option value="1">JK-BMS (Hankzor / JiKong)</option>
+      <option value="3">Daly-BMS (Daly Smart BMS)</option>
     </select>
   </div>
 
@@ -915,6 +916,7 @@ function applyBleChoice(valStr) {
     if (d.mac) document.getElementById('bms-mac').value = d.mac;
     if (d.type === 'JBD-BMS') document.getElementById('bms-type').value = 2;
     if (d.type === 'JK-BMS') document.getElementById('bms-type').value = 1;
+    if (d.type === 'Daly-BMS') document.getElementById('bms-type').value = 3;
   } catch(e) {}
 }
 

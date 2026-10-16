@@ -39,6 +39,7 @@ public:
 
     bool readJbdCapacityParams();
     bool writeJbdCapacityParams(float nominalAh, float cycleAh, uint8_t cellCount, uint16_t fullMv);
+    bool writeDalyCapacityParams(float nominalAh, uint8_t cellCount);
 
 private:
     void sendJbdCommand(uint8_t cmd, uint8_t reg, const uint8_t* payload = nullptr, uint8_t len = 0);
@@ -52,6 +53,11 @@ private:
     void decodeJkCellInfo(const std::vector<uint8_t>& data);
     void decodeJkSettings(const std::vector<uint8_t>& data);
     std::vector<uint8_t> buildJkFrame(uint8_t address, uint32_t value, uint8_t length);
+
+    void sendDalyCommand(uint8_t cmdId, const uint8_t* payload = nullptr);
+    void handleDalyPacket(const uint8_t* data, size_t len);
+    void decodeDalyTelemetry(uint8_t cmdId, const uint8_t* payload);
+    uint8_t calcDalyChecksum(const uint8_t* buf, size_t len);
 
     AppConfig        m_config;
     NimBLEClient*    m_pClient = nullptr;
@@ -70,6 +76,11 @@ private:
     // JK Characteristics
     NimBLERemoteCharacteristic* m_pJkNotifyChar  = nullptr;
     NimBLERemoteCharacteristic* m_pJkWriteChar   = nullptr;
+
+    // Daly Characteristics
+    NimBLERemoteCharacteristic* m_pDalyNotifyChar = nullptr;
+    NimBLERemoteCharacteristic* m_pDalyWriteChar  = nullptr;
+    bool                        m_dalyWriteWithResponse = false;
 
     BmsTelemetry     m_telemetry;
     std::vector<uint8_t> m_rxBuffer;

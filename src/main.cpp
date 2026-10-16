@@ -342,13 +342,19 @@ void setupWebServerRoutes() {
         server.send(200, "application/json", out);
     });
 
-    // API: Trigger reading EEPROM parameters from JBD BMS
+    // API: Trigger reading EEPROM parameters from JBD / Daly BMS
     server.on("/api/bms/read_params", HTTP_POST, []() {
-        bool ok = bleClient.readJbdCapacityParams();
-        if (ok) {
-            server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"EEPROM read requested\"}");
+        if (bleClient.getTelemetry().bms_type == "JBD-BMS") {
+            bool ok = bleClient.readJbdCapacityParams();
+            if (ok) {
+                server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"EEPROM read requested\"}");
+            } else {
+                server.send(400, "application/json", "{\"status\":\"error\",\"error\":\"BMS not connected or not JBD\"}");
+            }
+        } else if (bleClient.getTelemetry().bms_type == "Daly-BMS") {
+            server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Daly telemetry active\"}");
         } else {
-            server.send(400, "application/json", "{\"status\":\"error\",\"error\":\"BMS not connected or not JBD\"}");
+            server.send(400, "application/json", "{\"status\":\"error\",\"error\":\"BMS not connected or unsupported\"}");
         }
     });
 
@@ -371,11 +377,17 @@ void setupWebServerRoutes() {
             return;
         }
 
-        bool ok = bleClient.writeJbdCapacityParams(nominalAh, cycleAh, cellCount, fullMv);
+        bool ok = false;
+        if (bleClient.getTelemetry().bms_type == "JBD-BMS") {
+            ok = bleClient.writeJbdCapacityParams(nominalAh, cycleAh, cellCount, fullMv);
+        } else if (bleClient.getTelemetry().bms_type == "Daly-BMS") {
+            ok = bleClient.writeDalyCapacityParams(nominalAh, cellCount);
+        }
+
         if (ok) {
-            server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"EEPROM parameters updated successfully\"}");
+            server.send(200, "application/json", "{\"status\":\"ok\",\"message\":\"BMS parameters updated successfully\"}");
         } else {
-            server.send(500, "application/json", "{\"status\":\"error\",\"error\":\"Write failed or not connected to JBD\"}");
+            server.send(500, "application/json", "{\"status\":\"error\",\"error\":\"Write failed or unsupported BMS\"}");
         }
     });
 

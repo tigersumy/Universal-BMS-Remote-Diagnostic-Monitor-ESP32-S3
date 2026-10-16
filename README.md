@@ -20,6 +20,7 @@
 - **Multi-Protocol BLE Engine:**
   - **JBD-BMS (Xiaoxiang):** Supports 4S / 8S / 16S / 24S battery configurations, automatic discovery of `0xFF00`, `0xFFF0`, `0xFEE7`, and Nordic UART services, multi-tier PIN authentication (`123456`, `1234`, `000000`, direct poll fallback), and automatic write mode detection (`Write with/without Response`).
   - **JK-BMS (JiKong / Hankzor):** Complete 24S and 32S protocol support (0x97 / 0x96 handshake) with dynamic frame offset alignment.
+  - **Daly-BMS (Daly Smart BMS):** Full telemetry support (0x90–0x98) covering total voltage, current, SOC, individual cell voltages, NTC temperatures, MOS states, and remote parameter configuration.
 - **Embedded Tailscale VPN Client (MicroLink + WireGuard lwIP):**
   - Secure remote access from anywhere across the globe without port forwarding, NAT traversal issues, or public IP addresses.
   - Dynamically allocated in **2 MB PSRAM** buffers supporting up to 32 active peers in your tailnet.
@@ -105,6 +106,7 @@ Once connected to the local Wi-Fi network, the device joins your Tailnet automat
 - **Універсальний мультипротокольний BLE-рушій:**
   - **JBD-BMS (Xiaoxiang):** підтримка конфігурацій 4S / 8S / 16S / 24S, автоматичне розпізнавання сервісів `0xFF00`, `0xFFF0`, `0xFEE7` та Nordic UART, багаторівневий перебір PIN-авторизації (`123456`, `1234`, `000000`, пряме опитування), автопідбір режиму запису (`Write with/without Response`).
   - **JK-BMS (JiKong / Hankzor):** повна підтримка 24S та 32S протоколу (0x97 / 0x96 Handshake) з автоматичною адаптацією зміщення кадрів.
+  - **Daly-BMS (Daly Smart BMS):** повна підтримка телеметрії (0x90–0x98): загальна напруга, струм, SOC, напруги кожної комірки, температури NTC, статуси MOS-ключів та налаштування параметрів ємності.
 - **Вбудований клієнт Tailscale VPN (MicroLink + WireGuard lwIP):**
   - Повний віддалений доступ до пристрою з будь-якої точки світу без білої IP-адреси та без прокидання портів на роутері.
   - Оптимізовано для роботи в **2 МБ PSRAM** (буфери HTTP/2, таблиці маршрутизації до 32 пірів).
