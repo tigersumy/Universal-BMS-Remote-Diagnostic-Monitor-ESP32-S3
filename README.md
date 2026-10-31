@@ -56,25 +56,83 @@
 
 ## 🏛️ Project Architecture
 
+The project codebase is architectured around a multi-protocol BLE engine with modular decoders and diagnostic sinks:
+
 ```
 Universal-BMS-Remote-Diagnostic-Monitor-ESP32-S3/
 ├── bin/
-│   ├── firmware.bin                     # Latest compiled application firmware
-│   ├── firmware.factory.bin             # Combined binary with bootloader & partitions
-│   └── firmware_esp32s3_universal_bms_v1.3.0.bin # Release v1.3.0 standalone binary
+│   ├── firmware.bin                               # Latest compiled application firmware
+│   ├── firmware.factory.bin                       # Combined binary (bootloader + partitions + app)
+│   ├── firmware_esp32s3_universal_bms_v1.3.0.bin  # Standalone v1.3.0 application binary
+│   └── firmware_esp32s3_universal_bms_v1.3.0.factory.bin # Combined v1.3.0 factory image
 ├── include/
-│   ├── BmsBleClient.h                   # Multi-protocol BLE state machine & characteristic handles
-│   ├── BmsProtocol.h                    # Unified BmsTelemetry model, alarm masks, protocol enums
-│   ├── Config.h                         # NVS configuration manager (Wi-Fi, BMS type, Tailscale)
-│   ├── DebugLogger.h                    # Thread-safe ring buffer for TX/RX live BLE packet traces
-│   └── WebDashboard.h                   # Embedded responsive multilingual web UI (EN/UA) & gauges
+│   ├── BmsBleClient.h                             # Universal BLE client state machine & protocol dispatchers
+│   │   ├── JBD Driver                             # Services 0xFF00, 0xFFF0, 0xFEE7, NUS, PIN auth, EEPROM
+│   │   ├── JK Driver                              # Service 0xFFE0, 0x97/0x96 handshake & dynamic offset alignment
+│   │   ├── Daly Driver                            # Services 0xFFF0, 02F00000, commands 0x90–0x98
+│   │   ├── Ant Driver                             # Active 0xDB polling, 140B stream, 0xA5 MOS switch control
+│   │   └── Redodo / LiTime Driver                 # Command 0x13 query, 105B monolithic frame decoder
+│   ├── BmsProtocol.h                              # Unified BmsTelemetry model, alarm bitmasks, protocol enums
+│   ├── Config.h                                   # Persistent NVS configuration manager (Wi-Fi, BMS type, Tailscale)
+│   ├── DebugLogger.h                              # High-speed thread-safe ring buffer for TX/RX live BLE packet traces
+│   └── WebDashboard.h                             # Embedded responsive multilingual web UI (EN/UA) & gauges
 ├── src/
-│   ├── BmsBleClient.cpp                 # BLE drivers for JK, JBD, Daly, Ant, and Redodo protocols
-│   ├── DebugLogger.cpp                  # Packet log storage & serial mirror
-│   └── main.cpp                         # FreeRTOS tasks orchestration, Tailscale VPN & HTTP server
-├── platformio.ini                       # PlatformIO board configuration (ESP32-S3 SuperMini)
-└── partitions.csv                       # Custom flash partition table (OTA + Tailscale)
+│   ├── BmsBleClient.cpp                           # Multi-protocol BLE connection, polling engines & packet decoders
+│   ├── DebugLogger.cpp                            # In-memory packet trace buffer & serial mirror
+│   └── main.cpp                                   # FreeRTOS task orchestration, Tailscale VPN & HTTP REST server
+├── docs & specifications/
+│   ├── ANT_communication_protocol_EN.1.pdf        # Official Ant BMS protocol specifications
+│   ├── DALY_BMS_BLE_SPEC.md                       # Daly BLE 0xFFF0 & proprietary GATT profile spec
+│   ├── dalyModbusProtocol.pdf                     # Daly Modbus RTU register mapping guide
+│   └── Protocol.md                                # JBD UART/RS485 frame formats, checksums & golden captures
+├── platformio.ini                                 # PlatformIO board configuration (ESP32-S3 SuperMini N4R2)
+└── partitions_ota.csv                             # Dual OTA flash partition table (OTA + Tailscale)
 ```
+
+---
+
+## 🔍 Live Packet Trace: Diagnostics & Examples
+
+The built-in **Live Packet Trace** terminal provides real-time visibility into raw Bluetooth Low Energy packets exchanged between the ESP32-S3 and the BMS.
+
+### 📋 Protocol Frame Reference Table
+
+| BMS Protocol | Function / Command | Transmitted Raw Frame (`[TX >>]`) | Expected Raw Response (`[RX <<]`) | Decoded Information |
+| :--- | :--- | :--- | :--- | :--- |
+| **JBD-BMS** | Read Basic Info (`0x03`) | `DD A5 03 00 FF FD 77` | `DD 03 00 1B ... CK 77` (34 bytes) | Pack voltage (10mV), Current (10mA), Remaining Ah, SOC%, NTC probes, Protection status |
+| **JBD-BMS** | Read Cell Voltages (`0x04`) | `DD A5 04 00 FF FC 77` | `DD 04 00 [2N] [mV1] [mV2]... CK 77` | Individual cell voltages (1mV resolution, 4S–24S) |
+| **JBD-BMS** | Read Device Name (`0x05`) | `DD A5 05 00 FF FB 77` | `DD 05 00 [LEN] [ASCII] CK 77` | Factory BLE broadcast name |
+| **JBD-BMS** | PIN Auth (`123456`) | `DD 5A 0B 06 31 32 33 34 35 36 CK 77` | `DD 0B 00 00 CK 77` | Unlocks read/write access on PIN-protected JBD models |
+| **JK-BMS** | Request Telemetry Handshake | `4E 57 00 13 00 00 00 00 06 03 00 00 00 00 00 00 68` | `4E 57 [LEN] 01 ... [~300B TLV]` | Full battery telemetry block (cells, currents, MOS state, balancer) |
+| **Daly Smart** | Query Basic Info (`0x90`) | `A5 40 90 08 00 00 00 00 00 00 00 00 7D` | `A5 01 90 08 [V] [A] [SOC] CK` (13 bytes) | Pack voltage (0.1V), Current (30000 offset, 0.1A), SOC (0.1%) |
+| **Daly Smart** | Query Cell Voltages (`0x95`) | `A5 40 95 08 00 00 00 00 00 00 00 00 82` | `A5 01 95 08 [Frame#] [3×Cell mV] CK` | Multi-frame individual cell voltages up to 24S |
+| **Ant-BMS** | Poll Telemetry Stream (`0xDB`) | `5A 5A 00 00 00 00` *(or `DB DB`)* | `AA 55 AA FF [140 bytes] CK` | 140B stream: cell voltages up to 32S, MOS temperatures, power, remaining Ah |
+| **Ant-BMS** | Toggle Charge Switch | `A5 A5 01 01 [State 01/00] CK` | `AA 55 ...` confirmation frame | Actuates charge protection MOSFET on Ant BMS |
+| **Redodo / LiTime** | Query Status & Cells (`0x13`) | `00 00 04 01 13 55 AA 17` | `00 00 61 01 93 55 AA ... [105 bytes]` | 105B monolithic frame: 16S cells, pack voltage, current, temps, protections, balancer |
+
+### 🛠️ How to Use the Diagnostic Tools
+
+1. **Send Raw Frames via Web UI:**
+   - In the web dashboard (`http://100.x.y.z/` or `http://192.168.4.1/setup`), scroll down to the **Live BLE Diagnostics** section.
+   - Click any 1-Click quick test button (e.g. `[Basic Info 0x03]`, `[Cells 0x04]`, `[Name 0x05]`).
+   - Or enter custom hex bytes in the input field (e.g. `DD A5 03 00 FF FD 77`) and click **Send Frame**.
+2. **Send Raw Frames via REST API:**
+   ```bash
+   curl -X POST http://100.x.y.z/api/send-raw-ble \
+        -H "Content-Type: application/json" \
+        -d '{"hex":"DD A5 03 00 FF FD 77"}'
+   ```
+3. **Verify Responses in Live Terminal:**
+   - Transmitted frames appear in cyan: `[TX >>] DD A5 03 00 FF FD 77`.
+   - Incoming BMS frames appear in bright green: `[RX <<] DD 03 00 1B 14 D0 00 00 ... 77`.
+   - Parsed values and status updates appear in white/yellow notifications.
+4. **Export & Save Packet Logs:**
+   - In the web dashboard, click **📋 Copy Log** to export all entries to your clipboard.
+   - Or download the entire 200-entry ring buffer in JSON format via HTTP:
+     ```bash
+     curl -s http://100.x.y.z/api/debug-log > bms_packet_trace.json
+     ```
+   - Clear the log buffer at any time using **🧹 Clear Log** or `POST /api/clear-log`.
 
 ---
 
@@ -243,25 +301,83 @@ sensor:
 
 ## 🏛️ Архітектура проєкту
 
+Кодова база побудована навколо універсального мультипротокольного ядра з підтримкою 5 типів BMS:
+
 ```
 Universal-BMS-Remote-Diagnostic-Monitor-ESP32-S3/
 ├── bin/
-│   ├── firmware.bin                     # Актуальна скомпільована прошивка програми
-│   ├── firmware.factory.bin             # Повний комбінований бінарник (bootloader + partitions)
-│   └── firmware_esp32s3_universal_bms_v1.3.0.bin # Автономний релізний бінарник v1.3.0
+│   ├── firmware.bin                               # Актуальна скомпільована прошивка програми
+│   ├── firmware.factory.bin                       # Повний комбінований бінарник (bootloader + partitions + app)
+│   ├── firmware_esp32s3_universal_bms_v1.3.0.bin  # Автономний релізний бінарник v1.3.0
+│   └── firmware_esp32s3_universal_bms_v1.3.0.factory.bin # Повний заводський образ v1.3.0
 ├── include/
-│   ├── BmsBleClient.h                   # Заголовок універсального BLE-клієнта (5 протоколів)
-│   ├── BmsProtocol.h                    # Уніфікована структура BmsTelemetry, маски помилок
-│   ├── Config.h                         # Менеджер конфігурації NVS (Wi-Fi, тип BMS, Tailscale)
-│   ├── DebugLogger.h                    # Кільцевий буфер для логування BLE-трафіку (TX/RX)
-│   └── WebDashboard.h                   # Вбудований багатомовний веб-інтерфейс (UA/EN)
+│   ├── BmsBleClient.h                             # Заголовок та диспетчер станів BLE для 5 протоколів:
+│   │   ├── JBD Драйвер                            # Сервіси 0xFF00, 0xFFF0, 0xFEE7, NUS, PIN auth, EEPROM
+│   │   ├── JK Драйвер                             # Сервіс 0xFFE0, рукостискання 0x97/0x96, динамічне зміщення
+│   │   ├── Daly Драйвер                           # Сервіси 0xFFF0, 02F00000, команди 0x90–0x98
+│   │   ├── Ant Драйвер                            # Активне опитування 0xDB, 140B потік, ключі 0xA5
+│   │   └── Redodo / LiTime Драйвер                # Запит 0x13, монолітний 105-байтовий декодер
+│   ├── BmsProtocol.h                              # Уніфікована структура BmsTelemetry, маски помилок
+│   ├── Config.h                                   # Менеджер конфігурації NVS (Wi-Fi, тип BMS, Tailscale)
+│   ├── DebugLogger.h                              # Кільцевий буфер для логування BLE-трафіку (TX/RX)
+│   └── WebDashboard.h                             # Вбудований багатомовний веб-інтерфейс (UA/EN)
 ├── src/
-│   ├── BmsBleClient.cpp                 # Драйвери та декодери протоколів JK, JBD, Daly, Ant, Redodo
-│   ├── DebugLogger.cpp                  # Реалізація логера пакетів у пам'яті
-│   └── main.cpp                         # Запуск FreeRTOS задач, Tailscale VPN та HTTP сервера
-├── platformio.ini                       # Налаштування збірки PlatformIO (ESP32-S3 SuperMini)
-└── partitions.csv                       # Таблиця розділів Flash (OTA + Tailscale)
+│   ├── BmsBleClient.cpp                           # Реалізація опитування, парсингу та відправки для всіх 5 протоколів
+│   ├── DebugLogger.cpp                            # Реалізація логера пакетів у PSRAM та дзеркала UART
+│   └── main.cpp                                   # Запуск FreeRTOS задач, Tailscale VPN та HTTP сервера
+├── docs & specifications/
+│   ├── ANT_communication_protocol_EN.1.pdf        # Офіційна інженерна специфікація Ant BMS
+│   ├── DALY_BMS_BLE_SPEC.md                       # Специфікація Daly BLE 0xFFF0 та пропрієтарного сервісу
+│   ├── dalyModbusProtocol.pdf                     # Довідник регістрів Daly Modbus RTU
+│   └── Protocol.md                                # Специфікація кадрів, контрольних сум та відповідей JBD
+├── platformio.ini                                 # Налаштування збірки PlatformIO (ESP32-S3 SuperMini N4R2)
+└── partitions_ota.csv                             # Таблиця розділів Flash Dual OTA (OTA + Tailscale)
 ```
+
+---
+
+## 🔍 Live Packet Trace: Діагностика та приклади пакетів
+
+Вбудований у веб-панель термінал **Live Packet Trace** дає змогу бачити кожен сирий байт зв'язку між ESP32-S3 та BMS у реальному часі.
+
+### 📋 Зведена таблиця еталонних кадрів
+
+| BMS Протокол | Команда / Функція | Відправлений кадр (`[TX >>]`) | Очікувана відповідь (`[RX <<]`) | Що декодується з кадру |
+| :--- | :--- | :--- | :--- | :--- |
+| **JBD-BMS** | Запит Basic Info (`0x03`) | `DD A5 03 00 FF FD 77` | `DD 03 00 1B ... CK 77` (34 байти) | Загальна напруга (10мВ), струм (10мА), залишок Ah, SOC%, NTC датчики, біти захистів |
+| **JBD-BMS** | Запит напруг комірок (`0x04`)| `DD A5 04 00 FF FC 77` | `DD 04 00 [2N] [mV1] [mV2]... CK 77` | Напруга кожної комірки окремо (точність 1 мВ, від 4S до 24S) |
+| **JBD-BMS** | Запит імені пристрою (`0x05`)| `DD A5 05 00 FF FB 77` | `DD 05 00 [LEN] [ASCII] CK 77` | Заводська назва пристрою у BLE-ефірі |
+| **JBD-BMS** | Авторизація PIN (`123456`) | `DD 5A 0B 06 31 32 33 34 35 36 CK 77` | `DD 0B 00 00 CK 77` | Розблокування запису/читання на захищених паролем JBD |
+| **JK-BMS** | Рукостискання телеметрії | `4E 57 00 13 00 00 00 00 06 03 00 00 00 00 00 00 68` | `4E 57 [LEN] 01 ... [~300B TLV]` | Повний масив комірок, струми заряду/розряду, стан балансира |
+| **Daly Smart** | Запит Basic Info (`0x90`) | `A5 40 90 08 00 00 00 00 00 00 00 00 7D` | `A5 01 90 08 [V] [A] [SOC] CK` (13 байт) | Напруга (0.1V), струм (зміщення 30000, 0.1A), SOC (0.1%) |
+| **Daly Smart** | Запит напруг комірок (`0x95`)| `A5 40 95 08 00 00 00 00 00 00 00 00 82` | `A5 01 95 08 [Frame#] [3×Cell mV] CK` | Багатокадрова передача напруг комірок до 24S |
+| **Ant-BMS** | Опитування телеметрії (`0xDB`) | `5A 5A 00 00 00 00` *(або `DB DB`)* | `AA 55 AA FF [140 байт] CK` | 140-байтовий потік: напруги до 32S, потужність, температури MOS, ємність |
+| **Ant-BMS** | Увімкнення заряду | `A5 A5 01 01 01 CK` | `AA 55 ...` кадр підтвердження | Безпосереднє перемикання MOSFET заряду |
+| **Redodo / LiTime** | Опитування статусу (`0x13`) | `00 00 04 01 13 55 AA 17` | `00 00 61 01 93 55 AA ... [105 байт]` | Монолітний 105-байтовий кадр: 16S осередків, напруга, струм, температури, захисти |
+
+### 🛠️ Практична інструкція використання діагностики
+
+1. **Відправка сирих команд через Web UI:**
+   - Відкрийте веб-панель (`http://100.x.y.z/` або `http://192.168.4.1/setup`) та перейдіть до блоку **Live BLE Diagnostics**.
+   - Натисніть кнопку швидкого тесту в 1 клік (наприклад, `[Basic Info 0x03]`, `[Cells 0x04]`, `[Name 0x05]`).
+   - Або введіть довільний HEX-рядок у поле вводу (наприклад, `DD A5 03 00 FF FD 77`) і натисніть кнопку **Відправити кадр**.
+2. **Відправка через REST API:**
+   ```bash
+   curl -X POST http://100.x.y.z/api/send-raw-ble \
+        -H "Content-Type: application/json" \
+        -d '{"hex":"DD A5 03 00 FF FD 77"}'
+   ```
+3. **Аналіз відповіді в терміналі:**
+   - Вихідний пакет відображається бірюзовим кольором: `[TX >>] DD A5 03 00 FF FD 77`.
+   - Вхідна відповідь від BMS підсвічується зеленим: `[RX <<] DD 03 00 1B 14 D0 00 00 ... 77`.
+   - Логер автоматично розбирає вміст і виводить розшифровані величини.
+4. **Збереження та експорт діагностичного логу:**
+   - Натисніть **📋 Копіювати лог** у веб-інтерфейсі для миттєвого збереження всього трейсу в буфер обміну.
+   - Або збережіть повний кільцевий буфер на 200 записів у форматі JSON через термінал:
+     ```bash
+     curl -s http://100.x.y.z/api/debug-log > bms_packet_trace.json
+     ```
+   - За потреби очистити буфер натисніть **🧹 Очистити** або виконайте `POST /api/clear-log`.
 
 ---
 
