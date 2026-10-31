@@ -59,6 +59,17 @@ private:
     void decodeDalyTelemetry(uint8_t cmdId, const uint8_t* payload);
     uint8_t calcDalyChecksum(const uint8_t* buf, size_t len);
 
+    // Ant protocol handlers
+    void sendAntPollRequest();
+    bool sendAntSwitchCommand(uint8_t cmd, uint8_t state);
+    void handleAntPacket(const uint8_t* data, size_t len);
+    void decodeAntLegacyTelemetry(const uint8_t* frame);
+
+    // Redodo / LiTime protocol handlers
+    void sendRedodoPollRequest();
+    void handleRedodoPacket(const uint8_t* data, size_t len);
+    void decodeRedodoTelemetry(const uint8_t* frame);
+
     AppConfig        m_config;
     NimBLEClient*    m_pClient = nullptr;
     bool             m_isConnected = false;
@@ -81,6 +92,14 @@ private:
     NimBLERemoteCharacteristic* m_pDalyNotifyChar = nullptr;
     NimBLERemoteCharacteristic* m_pDalyWriteChar  = nullptr;
     bool                        m_dalyWriteWithResponse = false;
+
+    // Ant Characteristics
+    NimBLERemoteCharacteristic* m_pAntNotifyChar = nullptr;
+    NimBLERemoteCharacteristic* m_pAntWriteChar  = nullptr;
+
+    // Redodo Characteristics
+    NimBLERemoteCharacteristic* m_pRedodoNotifyChar = nullptr;
+    NimBLERemoteCharacteristic* m_pRedodoWriteChar  = nullptr;
 
     BmsTelemetry     m_telemetry;
     std::vector<uint8_t> m_rxBuffer;

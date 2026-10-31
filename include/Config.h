@@ -9,13 +9,15 @@
 #define BMS_TYPE_JK   1
 #define BMS_TYPE_JBD  2
 #define BMS_TYPE_DALY 3
+#define BMS_TYPE_ANT  4
+#define BMS_TYPE_REDODO 5
 
 struct AppConfig {
     String  wifi_ssid;
     String  wifi_pass;
     String  bms_mac;
     String  bms_name;
-    uint8_t bms_type;    // 0=Auto, 1=JK, 2=JBD, 3=Daly
+    uint8_t bms_type;    // 0=Auto, 1=JK, 2=JBD, 3=Daly, 4=Ant, 5=Redodo
     String  bms_pin;     // Default "123456"
     uint8_t cell_count;  // 4, 8, 16, 24
     bool    ts_enabled;  // Tailscale VPN enabled
